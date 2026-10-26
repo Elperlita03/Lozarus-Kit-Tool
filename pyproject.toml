@@ -1,0 +1,40 @@
+# Manifiesto de dependencias de Lozarus.
+#
+# Declara las bibliotecas externas que el proyecto usa, con las versiones observadas en este equipo
+# el 2026-10-20. Su propósito es la REPRODUCIBILIDAD local: que un entorno nuevo pueda instalar lo
+# mismo. NO publica nada ni empaqueta el proyecto (se ejecuta como scripts: `python gui_qt.py`,
+# `python auditor.py`).
+#
+# Las dependencias se agrupan según CÓMO se usan de verdad (verificado por análisis de imports):
+#   · core      -> lo que necesita el GUI principal (gui_qt.py) para arrancar.
+#   · cli       -> solo la auditoría por consola (auditor.py).
+#   · etw      -> solo el colector ETW (collectors/etw_collector.py); Windows, en su propio venv.
+#   · dev       -> pruebas (la suite también corre sin pytest, con `python tests/test_*.py`).
+
+[project]
+name = "lozarus"
+version = "0.1.0"
+description = "Plataforma local de defensa, telemetría y análisis forense para Windows (en desarrollo)."
+# Probado con Python 3.13.15 x64. Versiones inferiores podrían funcionar, pero no se han verificado.
+requires-python = ">=3.13"
+
+# --- core: GUI principal (gui_qt.py) -----------------------------------------------------------
+# Versiones detectadas: PySide6 6.12.0 · qtawesome 1.4.2 · psutil 7.2.2 · plyer 2.1.0
+dependencies = [
+    "PySide6>=6.12,<7",     # interfaz principal (Qt)
+    "qtawesome>=1.4,<2",    # iconos vectoriales (degrada si falta)
+    "psutil>=7.2,<8",       # procesos, conexiones, CPU/RAM
+    "plyer>=2.1,<3",        # notificaciones de escritorio (Vanguardia; degrada si falta)
+]
+
+[project.optional-dependencies]
+# Auditoría por consola (auditor.py). 'rich' NO está instalado en el entorno principal de este
+# equipo; el CLI lo necesita. Rango conservador (no se pudo leer la versión instalada).
+cli = ["rich>=13,<15"]
+
+# Colector ETW (collectors/etw_collector.py). Solo Windows y con Administrador. Se mantiene en su
+# PROPIO entorno virtual (ver spikes/etw/requirements-spike.txt); versión verificada: 0.2.0.
+etw = ["pywintrace==0.2.0"]
+
+# Desarrollo. La suite de pruebas también se ejecuta sin pytest (cada archivo tiene su _run_all()).
+dev = ["pytest>=8,<9"]

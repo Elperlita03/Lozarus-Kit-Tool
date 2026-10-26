@@ -1,0 +1,9 @@
+# Entornos virtuales (p. ej. spikes/etw/.venv)
+.venv/
+
+# Bytecode de Python
+__pycache__/
+
+# Salida en tiempo de ejecución: instantáneas, informes de procesos y señuelos de ESTE equipo.
+# Contiene datos del host; no debe versionarse.
+Lozarus_Forensics/
