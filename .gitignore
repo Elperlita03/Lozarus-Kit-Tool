@@ -1,9 +1,29 @@
-# Entornos virtuales (p. ej. spikes/etw/.venv)
-.venv/
-
-# Bytecode de Python
+# Python
 __pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.venv/
+venv/
+env/
+*.egg-info/
+dist/
+build/
 
-# Salida en tiempo de ejecución: instantáneas, informes de procesos y señuelos de ESTE equipo.
-# Contiene datos del host; no debe versionarse.
+# Datos sensibles / runtime de Lozarus
 Lozarus_Forensics/
+Lozarus_Vault_Decoy/
+eventos.jsonl
+tactical_config.json
+*.log
+.honeypot_estado.json
+.cuarentena_estado.json
+
+# IDEs
+.vscode/
+.idea/
+*.swp
+
+# OS
+Thumbs.db
+.DS_Store

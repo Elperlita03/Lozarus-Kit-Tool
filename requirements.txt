@@ -1,0 +1,6 @@
+# Requiere Python >= 3.13 (ver pyproject.toml)
+PySide6>=6.12,<7
+qtawesome>=1.4,<2
+psutil>=7.2,<8
+plyer>=2.1,<3
+pytest>=8,<9
