@@ -26,6 +26,9 @@ sistema.
 
 - `modulos/` — motor de plugins de auditoría (solo lectura) más los módulos de apoyo:
   monitor en vivo, forense, contención, operaciones tácticas y defensa local.
+- `ui/` — interfaz PySide6 por piezas: tema y QSS (`theme.py`), widgets comunes (`widgets.py`),
+  diálogos, marco de la ventana (`chrome.py`) y una página por archivo (`page_*.py`).
+  `gui_qt.py` solo monta la ventana principal y el menú lateral.
 - `Lozarus_Forensics/` — salida en disco: snapshots de «caja negra», reportes forenses,
   configuraciones de Sandbox y archivos señuelo del honeypot.
 

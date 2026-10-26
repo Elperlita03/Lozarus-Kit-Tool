@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-Pruebas de COMPORTAMIENTO del widget ProcessMonitor (gui_qt.py) del Monitor en Vivo.
+Pruebas de COMPORTAMIENTO del widget ProcessMonitor (ui/page_monitor.py, reexportado por gui_qt.py) del Monitor en Vivo.
 
 Qué son y qué NO son:
   · Son pruebas automatizadas de la LÓGICA del widget (estado de temporizadores, filtrado, orden,
