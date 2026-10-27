@@ -27,7 +27,7 @@ from modulos._monitor import LiveMonitor
 from modulos._tacticas import launch_in_sandbox, sandbox_available
 
 from ui._compat import Event, ObservationQuality
-from ui.theme import COLORS, SEVERITY_COLORS
+from ui.theme import COLORS, GLASS, MONO_CSS, SEVERITY_COLORS
 from ui.widgets import (Page, _emit_event, format_bytes, frozen, icon, make_table, repolish, set_busy,
                         stat_chip, with_icon)
 from ui.dialogs import ConfirmDialog
@@ -52,10 +52,10 @@ PROTECTED_PROCS = frozenset({"system", "secure system", "registry", "memory comp
                              "dwm.exe"})
 # acción -> (texto del menú, icono, color, infinitivo y participio para los mensajes)
 PROC_ACTIONS = {
-    "terminate": ("Finalizar tarea", "fa5s.times-circle", "#EF4444", "finalizar", "finalizado"),
-    "suspend": ("Suspender", "fa5s.pause-circle", "#F59E0B", "suspender", "suspendido"),
-    "resume": ("Reanudar", "fa5s.play-circle", "#22C55E", "reanudar", "reanudado"),
-    "trust": ("Confiar (lista blanca)", "fa5s.user-check", "#60A5FA", "confiar en", "de confianza"),
+    "terminate": ("Finalizar tarea", "fa5s.times-circle", COLORS["danger"], "finalizar", "finalizado"),
+    "suspend": ("Suspender", "fa5s.pause-circle", COLORS["warn"], "suspender", "suspendido"),
+    "resume": ("Reanudar", "fa5s.play-circle", COLORS["ok"], "reanudar", "reanudado"),
+    "trust": ("Confiar (lista blanca)", "fa5s.user-check", COLORS["accent"], "confiar en", "de confianza"),
 }
 # En Windows cada suspensión se acumula (hay que reanudar tantas veces como se suspendió): se
 # recuerda qué procesos suspendió Lozarus para no ofrecer «Suspender» dos veces seguidas.
@@ -66,12 +66,6 @@ MENU_QSS = (f"QMenu {{ background:{COLORS['card']}; border:1px solid {COLORS['bo
             f"QMenu::item:selected {{ background:{COLORS['accent_soft']}; }}"
             f"QMenu::item:disabled {{ color:{COLORS['faint']}; }}"
             f"QMenu::separator {{ height:1px; background:{COLORS['border']}; margin:4px 6px; }}")
-
-
-def _toast(app, kind: str, title: str, text: str, icon_name: str) -> None:
-    """Aviso in-app del resultado (no entra en el Centro de Alertas: lo ha pedido el usuario)."""
-    Toast(app, {"when": dt.datetime.now(), "kind": kind, "title": title, "text": text,
-                "icon": icon_name}).slide_in()
 
 
 def _identity(proc) -> tuple:
@@ -96,7 +90,7 @@ def _report(app, action: str, pid: int, name, ok: bool, title: str, text: str, i
     app.console.log("*" if ok else "x", f"{PROC_ACTIONS[action][0]}: {text}")
     _emit_event(app, source="monitor:control", event_type=f"process.{action}",
                 payload={"pid": pid, "name": name, "ok": ok, "detail": text}, process_id=pid)
-    _toast(app, "*" if ok else "x", title, text, icon_name)
+    Toast.notify(app, "*" if ok else "x", title, text, icon_name)
     return ok
 
 
@@ -158,16 +152,16 @@ def process_menu(app, parent, global_pos, pid, name=None, *, status=None, create
         proc = psutil.Process(pid)
         same = _same_process(proc, name, created)
     except psutil.NoSuchProcess:
-        _toast(app, "x", "Proceso no encontrado", f"«{name or '?'}» (PID {pid}) ya no existe.",
-               "fa5s.exclamation-triangle")
+        Toast.notify(app, "x", "Proceso no encontrado", f"«{name or '?'}» (PID {pid}) ya no existe.",
+                     "fa5s.exclamation-triangle")
         return
     except (psutil.Error, OSError) as exc:
-        _toast(app, "x", "Control de procesos", f"No se pudo abrir el PID {pid}: {exc}",
-               "fa5s.exclamation-triangle")
+        Toast.notify(app, "x", "Control de procesos", f"No se pudo abrir el PID {pid}: {exc}",
+                     "fa5s.exclamation-triangle")
         return
     if not same:
-        _toast(app, "!", "Control de procesos", f"El PID {pid} ya pertenece a otro proceso; espera a la "
-               "siguiente muestra.", "fa5s.exclamation-triangle")
+        Toast.notify(app, "!", "Control de procesos", f"El PID {pid} ya pertenece a otro proceso; espera a la "
+                     "siguiente muestra.", "fa5s.exclamation-triangle")
         return
 
     own = pid == os.getpid()
@@ -233,7 +227,7 @@ class Sparkline(QWidget):
         if len(vals) < 2:
             if vals:
                 p.setPen(Qt.PenStyle.NoPen)
-                p.setBrush(QColor("#DBEAFE"))
+                p.setBrush(QColor(COLORS["accent_hover"]))
                 p.drawEllipse(QPointF(w - pad, h - pad), 2.0, 2.0)
             return
         lo = 0.0 if self.zero_based else min(vals)
@@ -249,7 +243,9 @@ class Sparkline(QWidget):
             path.lineTo(pt)
         path.lineTo(pts[-1].x(), h - pad)
         path.closeSubpath()
-        p.fillPath(path, QColor(96, 165, 250, 46))  # acento #60A5FA translúcido
+        fill = QColor(COLORS["accent"])
+        fill.setAlpha(46)  # acento translúcido
+        p.fillPath(path, fill)
         pen = QPen(QColor(COLORS["accent_hover"]))
         pen.setWidthF(1.6)
         pen.setCapStyle(Qt.PenCapStyle.RoundCap)
@@ -258,7 +254,7 @@ class Sparkline(QWidget):
         p.setBrush(QBrush(Qt.BrushStyle.NoBrush))
         p.drawPolyline(QPolygonF(pts))
         p.setPen(Qt.PenStyle.NoPen)
-        p.setBrush(QColor("#DBEAFE"))
+        p.setBrush(QColor(COLORS["accent_hover"]))
         p.drawEllipse(pts[-1], 2.2, 2.2)
 
 
@@ -283,15 +279,15 @@ class ProcCard(QFrame):
         lay.setSpacing(12)
         self.stripe = QFrame()
         self.stripe.setFixedWidth(3)
-        self.stripe.setStyleSheet("background:#5E5E5E; border-radius:2px;")
+        self.stripe.setStyleSheet(f"background:{COLORS['faint']}; border-radius:2px;")
         lay.addWidget(self.stripe)
 
         info = QVBoxLayout()
         info.setSpacing(1)
         self.name = QLabel("—")
-        self.name.setStyleSheet("color:#FAFAFA; font-weight:bold; font-size:12px;")
+        self.name.setStyleSheet(f"color:{COLORS['text']}; font-weight:bold; font-size:12px;")
         self.meta = QLabel("")
-        self.meta.setStyleSheet("color:#9A9A9A; font-family:'Consolas'; font-size:11px;")
+        self.meta.setStyleSheet(f"color:{COLORS['text2']}; font-family:{MONO_CSS}; font-size:11px;")
         info.addWidget(self.name)
         info.addWidget(self.meta)
         namebox = QWidget()
@@ -300,7 +296,7 @@ class ProcCard(QFrame):
         lay.addWidget(namebox)
 
         self.reasons = QLabel("")
-        self.reasons.setStyleSheet("color:#E0E0E0; font-size:11px;")
+        self.reasons.setStyleSheet(f"color:{COLORS['text']}; font-size:11px;")
         self.reasons.setWordWrap(True)
         lay.addWidget(self.reasons, 1)
 
@@ -313,9 +309,9 @@ class ProcCard(QFrame):
         block.setSpacing(1)
         head = QHBoxLayout()
         cap = QLabel(caption)
-        cap.setStyleSheet("color:#5E5E5E; font-size:9px; font-weight:bold;")
+        cap.setStyleSheet(f"color:{COLORS['muted']}; font-size:9px; font-weight:bold; letter-spacing:0.6px;")
         val = QLabel("—")
-        val.setStyleSheet("color:#E0E0E0; font-family:'Consolas'; font-size:10px;")
+        val.setStyleSheet(f"color:{COLORS['text']}; font-family:{MONO_CSS}; font-size:10px;")
         head.addWidget(cap)
         head.addStretch(1)
         head.addWidget(val)
@@ -336,9 +332,9 @@ class ProcCard(QFrame):
 
     def _apply(self):
         c = self._border
-        bg = "#1E2633" if self._selected else "#18181C"
+        bg = GLASS["selected"] if self._selected else GLASS["inset"]
         self.setStyleSheet(f"#ProcCard {{ background:{bg}; border:1px solid "
-                           f"rgb({c.red()},{c.green()},{c.blue()}); border-radius:8px; }}")
+                           f"rgb({c.red()},{c.green()},{c.blue()}); border-radius:10px; }}")
 
     def _to(self, color):
         self._anim.stop()
@@ -375,7 +371,7 @@ class ProcCard(QFrame):
         color = SEVERITY_COLORS[alert.severity]
         self.name.setText(alert.name)
         self.meta.setText(f"PID {alert.pid} · {alert.severity.value}")
-        self.meta.setStyleSheet(f"color:{color}; font-family:'Consolas'; font-size:11px;")
+        self.meta.setStyleSheet(f"color:{color}; font-family:{MONO_CSS}; font-size:11px;")
         self.stripe.setStyleSheet(f"background:{color}; border-radius:2px;")
         self.reasons.setText("; ".join(alert.reasons))
         self.cpu_val.setText(f"{alert.cpu:.1f} %" if alert.cpu < 10 else f"{alert.cpu:.0f} %")

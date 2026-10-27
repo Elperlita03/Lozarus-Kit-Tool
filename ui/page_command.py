@@ -9,6 +9,7 @@ from __future__ import annotations
 import getpass
 import importlib
 import importlib.util
+import datetime as dt
 import os
 import socket
 import time
@@ -16,7 +17,8 @@ from typing import TYPE_CHECKING, Optional
 
 import psutil
 from PySide6.QtCore import QTimer, Qt
-from PySide6.QtWidgets import QFrame, QGridLayout, QHBoxLayout, QLabel, QPushButton, QVBoxLayout
+from PySide6.QtWidgets import (QCheckBox, QFrame, QGridLayout, QHBoxLayout, QLabel, QPushButton,
+                               QVBoxLayout)
 
 from modulos._alertas import HAS_PLYER
 from modulos._contencion import quarantine_active
@@ -27,14 +29,20 @@ from modulos._obsidian import events_per_minute, health_score, jsonl_size_kb, pr
 from modulos._tacticas import sandbox_available
 from modulos._utilidades import HAS_PSUTIL, _powershell_exe, is_admin
 
-from ui.theme import (COLORS, STATE_STYLE, ST_ALERT, ST_DEGRADED, ST_NOIMPL, ST_OK, ST_STOPPED,
-                      badge_qss)
-from ui.widgets import (BentoCard, Gauge, HealthBadge, Page, PulseGraph, Worker, frozen, icon,
-                        make_card, set_busy, with_icon)
+from ui.theme import (COLORS, MONO_CSS, STATE_STYLE, ST_ALERT, ST_DEGRADED, ST_NOIMPL, ST_OK,
+                      ST_STOPPED, badge_qss)
+from ui.widgets import (BentoCard, Gauge, HealthBadge, Page, PulseGraph, Worker, _emit_event, frozen,
+                        icon, make_card, set_busy, with_icon)
+from ui.chrome import Toast
 
 if TYPE_CHECKING:  # solo para las anotaciones; en ejecución evita el import circular
     from gui_qt import MainWindow
 
+# Piloto Automático: umbral de RAM, pausa mínima entre liberaciones y cadencia de la vigilancia
+# (una sola lectura de psutil cada 5 s, también con el Centro de Comando oculto).
+AP_RAM_THRESHOLD = 80
+AP_RAM_COOLDOWN_S = 300
+AP_RAM_POLL_MS = 5000
 
 # Componente del panel de salud -> página a la que lleva su mini-botón de acceso (o None).
 COMPONENT_PAGE = {
@@ -60,7 +68,7 @@ class ComponentCard(QFrame):
         top.setSpacing(8)
         self.dot = QLabel("●")
         nm = QLabel(name)
-        nm.setStyleSheet("color:#FAFAFA; font-size:12px; font-weight:600;")
+        nm.setStyleSheet(f"color:{COLORS['text']}; font-size:12px; font-weight:600;")
         self.badge = QLabel()
         top.addWidget(self.dot)
         top.addWidget(nm)
@@ -77,10 +85,9 @@ class ComponentCard(QFrame):
             top.addWidget(go)
         lay.addLayout(top)
         self.detail = QLabel(detail)
-        self.detail.setStyleSheet("color:#A1A1AA; font-size:11px;")
+        self.detail.setStyleSheet(f"color:{COLORS['text2']}; font-size:11px;")
         self.detail.setWordWrap(True)
         lay.addWidget(self.detail)
-        self.setStyleSheet("#CompCard { background:#141418; border:1px solid #272730; border-radius:9px; }")
         self.set_state(state, detail)
 
     def set_state(self, state: str, detail: str) -> None:
@@ -89,7 +96,7 @@ class ComponentCard(QFrame):
         if state == self._state:
             return
         self._state = state
-        color, label = STATE_STYLE.get(state, ("#71717A", "—"))
+        color, label = STATE_STYLE.get(state, (COLORS["muted"], "—"))
         self.dot.setStyleSheet(f"color:{color}; font-size:10px;")
         self.badge.setText(label)
         self.badge.setStyleSheet(badge_qss(color, 9))
@@ -292,16 +299,15 @@ class ComponentRow(QFrame):
         self.dot = QLabel("●")
         lay.addWidget(self.dot)
         nm = QLabel(name)
-        nm.setStyleSheet("color:#FAFAFA; font-size:13px; font-weight:600;")
+        nm.setStyleSheet(f"color:{COLORS['text']}; font-size:13px; font-weight:600;")
         nm.setMinimumWidth(190)
         lay.addWidget(nm)
         self.detail = QLabel(detail)
-        self.detail.setStyleSheet("color:#A1A1AA; font-size:11px;")
+        self.detail.setStyleSheet(f"color:{COLORS['text2']}; font-size:11px;")
         self.detail.setWordWrap(True)
         lay.addWidget(self.detail, 1)
         self.badge = QLabel()
         lay.addWidget(self.badge)
-        self.setStyleSheet("#CompRow { background:#141418; border:1px solid #27272A; border-radius:8px; }")
         self.set_state(state, detail)
 
     def set_state(self, state: str, detail: str) -> None:
@@ -311,7 +317,7 @@ class ComponentRow(QFrame):
         if state == self._state:
             return
         self._state = state
-        color, label = STATE_STYLE.get(state, ("#71717A", "—"))
+        color, label = STATE_STYLE.get(state, (COLORS["muted"], "—"))
         self.dot.setStyleSheet(f"color:{color}; font-size:11px;")
         self.badge.setText(label)
         self.badge.setStyleSheet(badge_qss(color))
@@ -331,8 +337,8 @@ class CommandPage(Page):
         tlay = QHBoxLayout(tele)
         tlay.setContentsMargins(24, 20, 24, 20)
         tlay.setSpacing(20)
-        self.cpu_gauge = Gauge("#60A5FA", size=116)
-        self.ram_gauge = Gauge("#A78BFA", size=116)
+        self.cpu_gauge = Gauge(COLORS["accent"], size=116)
+        self.ram_gauge = Gauge(COLORS["accent_2"], size=116)
         for gauge, caption in ((self.cpu_gauge, "CPU"), (self.ram_gauge, "MEMORIA")):
             col = QVBoxLayout()
             col.setSpacing(8)
@@ -381,7 +387,7 @@ class CommandPage(Page):
             k.setObjectName("CardText")
             k.setFixedWidth(88)
             v = QLabel(value)
-            v.setStyleSheet("color:#FAFAFA; font-family:'Consolas'; font-size:12px;")
+            v.setStyleSheet(f"color:{COLORS['text']}; font-family:{MONO_CSS}; font-size:12px;")
             row.addWidget(k)
             row.addWidget(v, 1)
             info.addLayout(row)
@@ -483,7 +489,7 @@ class CommandPage(Page):
         self._shield_on: Optional[bool] = None   # último estado pintado del escudo
         self._obs_prev = None                     # muestra previa del contador del bus (OBSIDIAN)
         self._obs_prev_t = None
-        self._ap_ram_last = 0.0                   # último momento en que se liberó RAM automáticamente
+        self._ap_ram_last: Optional[float] = None  # último momento (monotonic) de una liberación automática
         self._comp_rows: list = []               # filas de componentes vivas (se actualizan en su sitio)
         self._timer = QTimer(self)
         self._timer.setInterval(1000)
@@ -666,104 +672,203 @@ class CommandPage(Page):
         protected = bool(quarantine_active() or hp_on or self.app.sentinel_on)
         if protected != self._shield_on:  # regenerar icono y estilo SOLO al cambiar de estado
             self._shield_on = protected
-            color = "#22C55E" if protected else "#71717A"
+            color = COLORS["ok"] if protected else COLORS["muted"]
             self.shield_icon.setPixmap(icon("fa5s.shield-alt", color).pixmap(48, 48))
             self.shield_state.setText("ACTIVO" if protected else "EN REPOSO")
             self.shield_state.setStyleSheet(f"color:{color}; font-size:11px; font-weight:bold;")
         for bcard in self.cards:
             bcard.refresh()
-        # Piloto Automático: Auto-Optimizar RAM (comprueba en cada tic del cmd, visible)
-        tc = self.app.tactical_config
-        if tc and tc.get("ap_autoram", False):
-            if ram > 80 and (now - self._ap_ram_last) > 300:  # cooldown 5 min
-                self._ap_ram_last = now
-                self.app.console.log("~", f"Piloto: RAM {ram:.0f}% > 80% → liberando working sets…")
-                self.app.run_task(lambda emit: empty_working_sets(), self._ap_ram_done, track=False)
 
-    def _ap_ram_done(self, ok: bool, res) -> None:
-        if ok and isinstance(res, dict) and res.get("ok"):
-            self.app.console.log("*", f"Piloto Auto-RAM: {res['liberado_mb']} MB liberados ({res['procesos']} proc)")
-        else:
-            self.app.console.log("x", f"Piloto Auto-RAM: {res.get('error') if isinstance(res, dict) else res}")
-
+    # --- Piloto Automático ---------------------------------------------------------------------
     def _build_autopilot_card(self) -> QFrame:
         box, lay = make_card("Piloto Automático",
-                             "Automatizaciones persistentes que actúan en segundo plano sin clics manuales.")
+                             "Automatizaciones que actúan solas en segundo plano, aunque estés en otra "
+                             "sección de Lozarus.")
         tc = self.app.tactical_config
-        row1 = QHBoxLayout()
-        row1.setSpacing(10)
-        self._ap_ram_btn = QPushButton("Auto-Optimizar RAM (>80%)")
-        self._ap_ram_btn.setObjectName("Toggle")
-        self._ap_ram_btn.setCheckable(True)
-        self._ap_ram_btn.setChecked(bool(tc and tc.get("ap_autoram", False)))
-        with_icon(self._ap_ram_btn, "fa5s.memory", COLORS["muted"])
-        self._ap_ram_btn.setToolTip("Si la RAM supera el 80%, libera working sets en segundo plano (cooldown 5 min).")
-        self._ap_ram_btn.clicked.connect(self._toggle_ap_ram)
-        self._ap_defense_btn = QPushButton("Auto-Defensa al Iniciar")
-        self._ap_defense_btn.setObjectName("Toggle")
-        self._ap_defense_btn.setCheckable(True)
-        self._ap_defense_btn.setChecked(bool(tc and tc.get("ap_autodefense", False)))
-        with_icon(self._ap_defense_btn, "fa5s.shield-alt", COLORS["muted"])
-        self._ap_defense_btn.setToolTip("Al abrir Lozarus despliega el Honeypot y activa la vigilancia de puertos.")
-        self._ap_defense_btn.clicked.connect(self._toggle_ap_defense)
-        row1.addWidget(self._ap_ram_btn)
-        row1.addWidget(self._ap_defense_btn)
-        row1.addStretch(1)
-        lay.addLayout(row1)
-        row2 = QHBoxLayout()
-        row2.setSpacing(10)
-        self._maintenance_btn = QPushButton("⚡ Puesta a Punto Rápida")
-        self._maintenance_btn.setObjectName("Ghost")
-        with_icon(self._maintenance_btn, "fa5s.bolt", COLORS["muted"])
-        self._maintenance_btn.setToolTip("DNS flush + limpiar %TEMP% + liberar RAM en un clic.")
+        body = QHBoxLayout()
+        body.setSpacing(12)
+
+        auto = QFrame()
+        auto.setObjectName("Inset")
+        al = QVBoxLayout(auto)
+        al.setContentsMargins(14, 12, 14, 12)
+        al.setSpacing(4)
+        self._ap_ram_switch = self._switch(
+            al, f"Auto-Optimizar RAM (>{AP_RAM_THRESHOLD}%)",
+            "Si la memoria supera el umbral, libera los working sets de los procesos accesibles "
+            f"(como mucho una vez cada {AP_RAM_COOLDOWN_S // 60} min).",
+            bool(tc and tc.get("ap_autoram", False)), self._toggle_ap_ram)
+        self._ap_defense_switch = self._switch(
+            al, "Auto-Defensa al Iniciar",
+            "Al abrir Lozarus despliega el Honeypot y activa la vigilancia de puertos.",
+            bool(tc and tc.get("ap_autodefense", False)), self._toggle_ap_defense)
+        self._ap_status = QLabel("")
+        self._ap_status.setObjectName("Tiny")
+        self._ap_status.setWordWrap(True)
+        al.addWidget(self._ap_status)
+        al.addStretch(1)
+        body.addWidget(auto, 3)
+
+        tune = QFrame()
+        tune.setObjectName("Inset")
+        tl = QVBoxLayout(tune)
+        tl.setContentsMargins(14, 12, 14, 12)
+        tl.setSpacing(8)
+        ttl = QLabel("Puesta a Punto Inmediata")
+        ttl.setObjectName("CardTitle")
+        tdesc = QLabel("Vacía la caché DNS, purga los temporales que no estén en uso y libera RAM, "
+                       "todo de una vez.")
+        tdesc.setObjectName("CardText")
+        tdesc.setWordWrap(True)
+        self._maintenance_btn = QPushButton("Ejecutar Puesta a Punto")
+        self._maintenance_btn.setObjectName("Primary")
+        self._maintenance_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        with_icon(self._maintenance_btn, "fa5s.bolt", COLORS["accent_hover"])
         self._maintenance_btn.clicked.connect(self._quick_maintenance)
-        row2.addWidget(self._maintenance_btn)
-        row2.addStretch(1)
-        lay.addLayout(row2)
+        self._maintenance_last = QLabel("Aún no se ha ejecutado en esta sesión.")
+        self._maintenance_last.setObjectName("Tiny")
+        self._maintenance_last.setWordWrap(True)
+        for w in (ttl, tdesc):
+            tl.addWidget(w)
+        tl.addStretch(1)
+        tl.addWidget(self._maintenance_btn, 0, Qt.AlignmentFlag.AlignLeft)
+        tl.addWidget(self._maintenance_last)
+        body.addWidget(tune, 2)
+        lay.addLayout(body)
+
+        self._ap_ram_busy = False
+        self._ap_ram_now: Optional[float] = None   # última lectura de RAM del Piloto (%)
+        self._ap_ram_result = ""   # «12:30 · 230 MB» de la última liberación automática
+        self._ap_timer = QTimer(self)
+        self._ap_timer.setInterval(AP_RAM_POLL_MS)
+        self._ap_timer.timeout.connect(self._ap_ram_poll)
+        if self._ap_ram_switch.isChecked():
+            self._ap_timer.start()
+        self._ap_update_status()
         return box
 
-    def _toggle_ap_ram(self) -> None:
-        on = self._ap_ram_btn.isChecked()
+    @staticmethod
+    def _switch(layout, text: str, hint: str, checked: bool, slot) -> QCheckBox:
+        """Interruptor estilizado (QCheckBox#Switch del tema) con su explicación debajo."""
+        sw = QCheckBox(text)
+        sw.setObjectName("Switch")
+        sw.setCursor(Qt.CursorShape.PointingHandCursor)
+        sw.setChecked(checked)
+        sw.toggled.connect(slot)  # conectado después de setChecked: construir no dispara la acción
+        note = QLabel(hint)
+        note.setObjectName("Tiny")
+        note.setWordWrap(True)
+        note.setContentsMargins(46, 0, 0, 6)  # alineado con el texto, no con el interruptor
+        layout.addWidget(sw)
+        layout.addWidget(note)
+        return sw
+
+    def _toggle_ap_ram(self, on: bool) -> None:
         if self.app.tactical_config:
             self.app.tactical_config.set("ap_autoram", on)
         self.app.console.log("~", f"Piloto Auto-RAM {'ACTIVADO' if on else 'desactivado'}")
+        if on:
+            self._ap_timer.start()
+            self._ap_ram_poll()  # comprobación inmediata, sin esperar al primer intervalo
+        else:
+            self._ap_timer.stop()
+            self._ap_update_status()
 
-    def _toggle_ap_defense(self) -> None:
-        on = self._ap_defense_btn.isChecked()
+    def _toggle_ap_defense(self, on: bool) -> None:
         if self.app.tactical_config:
             self.app.tactical_config.set("ap_autodefense", on)
         self.app.console.log("~", f"Piloto Auto-Defensa al Iniciar {'ACTIVADO' if on else 'desactivado'}")
 
+    def _ap_ram_poll(self) -> None:
+        """Vigilancia del Piloto: lee la RAM y, por encima del umbral y fuera de la pausa, libera."""
+        if getattr(self.app, "_closing", False) or self._ap_ram_busy:
+            return
+        try:
+            ram = psutil.virtual_memory().percent
+        except Exception:  # noqa: BLE001
+            return
+        now = time.monotonic()
+        cooled = self._ap_ram_last is None or now - self._ap_ram_last > AP_RAM_COOLDOWN_S
+        if ram > AP_RAM_THRESHOLD and cooled:
+            self._ap_ram_last = now
+            self._ap_ram_busy = True
+            self.app.console.log("~", f"Piloto: RAM {ram:.0f}% > {AP_RAM_THRESHOLD}% → liberando working sets…")
+            self.app.run_task(lambda emit: empty_working_sets(),
+                              lambda ok, res, r=ram: self._ap_ram_done(ok, res, r), track=False)
+        self._ap_ram_now = ram
+        self._ap_update_status()
+
+    def _ap_ram_done(self, ok: bool, res, ram: float) -> None:
+        self._ap_ram_busy = False
+        if ok and isinstance(res, dict) and res.get("ok"):
+            mb = res.get("liberado_mb", 0)
+            self._ap_ram_result = f"{dt.datetime.now():%H:%M} · {mb:.0f} MB"
+            text = f"RAM al {ram:.0f}%: {mb:.0f} MB liberados de {res.get('procesos', 0)} procesos."
+            kind = "*"
+        else:
+            text = f"No se pudo liberar RAM: {res.get('error') if isinstance(res, dict) else res}"
+            kind = "x"
+        self.app.console.log(kind, f"Piloto Auto-RAM: {text}")
+        _emit_event(self.app, source="comando:piloto", event_type="autopilot.ram_release",
+                    payload={"ram_percent": ram, "ok": kind == "*", "detail": text})
+        Toast.notify(self.app, kind, "Piloto Automático", text, "fa5s.memory")
+        self._ap_update_status()
+
+    def _ap_update_status(self) -> None:
+        if not self._ap_ram_switch.isChecked():
+            text = "Vigilancia de RAM en pausa."
+        else:
+            ram = self._ap_ram_now
+            now = f"RAM ahora {ram:.0f}% · " if ram is not None else ""
+            last = f" · última liberación: {self._ap_ram_result}" if self._ap_ram_result else ""
+            text = f"● Vigilando · {now}umbral {AP_RAM_THRESHOLD}%{last}"
+        if text != self._ap_status.text():  # cada 5 s: solo repinta si cambió algo
+            self._ap_status.setText(text)
+
     def _quick_maintenance(self) -> None:
         set_busy(self._maintenance_btn, True, "Ejecutando…")
+        self.app.log_tactical("Puesta a Punto Inmediata: caché DNS + temporales + RAM")
 
-        def task(emit):
-            results = {}
+        def step(fn):
             try:
-                res = flush_dns()
-                results["dns"] = res.get("ok", False)
-            except Exception:  # noqa: BLE001
-                results["dns"] = False
-            try:
-                res = clean_temp()
-                results["temp_mb"] = res.get("freed_mb", 0)
-            except Exception:  # noqa: BLE001
-                results["temp_mb"] = 0
-            try:
-                res = empty_working_sets()
-                results["ram_mb"] = res.get("liberado_mb", 0) if res.get("ok") else 0
-            except Exception:  # noqa: BLE001
-                results["ram_mb"] = 0
-            return results
+                return fn()
+            except Exception as exc:  # noqa: BLE001  (un paso que falla no detiene los demás)
+                return exc
 
-        def done(ok, res):
-            set_busy(self._maintenance_btn, False)
-            if not ok:
-                self.app.console.log("x", f"Puesta a Punto: {res}")
-                return
-            dns_ok = "✓" if res.get("dns") else "✗"
-            self.app.console.log("*",
-                f"Puesta a Punto: DNS {dns_ok} · TEMP {res.get('temp_mb', 0):.1f} MB liberados "
-                f"· RAM {res.get('ram_mb', 0):.0f} MB liberados")
+        self.app.run_task(lambda emit: {"dns": step(flush_dns), "temp": step(clean_temp),
+                                        "ram": step(empty_working_sets)}, self._maintenance_done)
 
-        self.app.run_task(task, done)
+    def _maintenance_done(self, ok: bool, res) -> None:
+        set_busy(self._maintenance_btn, False)
+        if not ok or not isinstance(res, dict):
+            self.app.console.log("x", f"Puesta a Punto: {res}")
+            Toast.notify(self.app, "x", "Puesta a Punto Inmediata", f"No se pudo completar: {res}",
+                         "fa5s.bolt")
+            return
+        done, failed = [], []
+        dns = res["dns"]  # flush_dns() -> (ok, mensaje)
+        if isinstance(dns, tuple) and dns[0]:
+            done.append("caché DNS vaciada")
+        else:
+            failed.append(f"DNS: {dns[1] if isinstance(dns, tuple) else dns}")
+        temp = res["temp"]  # clean_temp() -> {ok, eliminados, omitidos, bytes, error}
+        if isinstance(temp, dict) and temp.get("ok"):
+            skipped = f", {temp['omitidos']} en uso omitidos" if temp.get("omitidos") else ""
+            done.append(f"{temp.get('bytes', 0) / 1024 ** 2:.1f} MB de temporales "
+                        f"({temp.get('eliminados', 0)} archivos{skipped})")
+        else:
+            failed.append(f"temporales: {temp.get('error') if isinstance(temp, dict) else temp}")
+        ram = res["ram"]  # empty_working_sets() -> {ok, procesos, liberado_mb, error}
+        if isinstance(ram, dict) and ram.get("ok"):
+            done.append(f"{ram.get('liberado_mb', 0):.0f} MB de RAM liberados")
+        else:
+            failed.append(f"RAM: {ram.get('error') if isinstance(ram, dict) else ram}")
+        kind = "*" if not failed else "!" if done else "x"
+        text = (" · ".join(done) or "Ningún paso se completó.") + \
+            (f"\nSin aplicar: {' · '.join(failed)}" if failed else "")
+        self.app.console.log(kind, f"Puesta a Punto: {text}")
+        _emit_event(self.app, source="comando:puesta_a_punto", event_type="system.maintenance",
+                    payload={"done": done, "failed": failed})
+        Toast.notify(self.app, kind, "Puesta a Punto Inmediata", text, "fa5s.bolt")
+        estado = "completa" if not failed else "parcial" if done else "fallida"
+        self._maintenance_last.setText(f"Última: {dt.datetime.now():%H:%M:%S} · {estado}.")

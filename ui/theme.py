@@ -6,6 +6,7 @@ Identidad visual de Lozarus: paleta, hoja de estilo QSS, iconos del menú y esti
 
 from __future__ import annotations
 
+import hashlib
 import os
 import tempfile
 from string import Template
@@ -54,12 +55,23 @@ def _css_families(families) -> str:
     return ", ".join(f"'{f}'" for f in families)
 
 
+MONO_CSS = _css_families(MONO_FAMILIES) + ", monospace"  # para font-family en estilos en línea
+
+# Superficies de «cristal» (rgba, para QSS y estilos en línea; no valen para QColor).
+GLASS = {
+    "card": "rgba(20, 17, 36, 0.62)",           # tarjetas translúcidas sobre el degradado de fondo
+    "card_hi": "rgba(30, 26, 54, 0.74)",
+    "inset": "rgba(8, 7, 16, 0.55)",            # baldosas hundidas dentro de una tarjeta
+    "selected": "rgba(124, 140, 255, 0.14)",    # elemento seleccionado
+}
+
 # Tokens SOLO para el QSS (admiten rgba() y degradados). Todo el «cristal» es QSS estático:
 # QLinearGradient + transparencias, sin temporizadores ni animaciones (coste de CPU nulo en reposo).
 _QSS_TOKENS = {
     **COLORS,
-    "glass": "rgba(20, 17, 36, 0.62)",          # tarjetas translúcidas sobre el degradado de fondo
-    "glass_hi": "rgba(30, 26, 54, 0.74)",
+    "glass": GLASS["card"],
+    "glass_hi": GLASS["card_hi"],
+    "inset": GLASS["inset"],
     "field": "rgba(5, 5, 10, 0.55)",            # campos de texto y consola
     "tint": "rgba(124, 140, 255, 0.10)",        # hover suave del acento
     "tint_hi": "rgba(124, 140, 255, 0.18)",     # selección / pulsado
@@ -72,7 +84,7 @@ _QSS_TOKENS = {
                     "stop:1 rgba(167, 139, 250, 0.16))",
     "grad_primary_hi": "qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 rgba(96, 165, 250, 0.28), "
                        "stop:1 rgba(167, 139, 250, 0.28))",
-    "mono": _css_families(MONO_FAMILIES) + ", monospace",
+    "mono": MONO_CSS,
 }
 
 # Hoja de estilo (QSS) «Dark Cosmos Glass». Plantilla con ${token} (string.Template): los valores
@@ -96,6 +108,16 @@ QSS = Template("""
 #Card:hover { border-color: ${border_hi}; }
 #CardTitle { color: ${text}; font-size: 11pt; font-weight: 700; letter-spacing: 0.5px; }
 #CardText { color: ${text2}; font-size: 10pt; }
+/* Baldosas hundidas dentro de una tarjeta (componentes, paneles del Piloto Automático) */
+#Inset, #CompCard, #CompRow { background-color: ${inset}; border: 1px solid ${border}; border-radius: 10px; }
+#Inset:hover, #CompCard:hover, #CompRow:hover { border-color: ${border_hi}; }
+/* Interruptor (QCheckBox#Switch): pista y mando son SVG estáticos, sin animación ni repintado extra */
+QCheckBox#Switch { color: ${text}; font-size: 10pt; font-weight: 600; spacing: 10px; }
+QCheckBox#Switch:disabled { color: ${disabled}; }
+QCheckBox#Switch::indicator { width: 36px; height: 20px; image: url("__SWITCH_OFF__"); }
+QCheckBox#Switch::indicator:hover { image: url("__SWITCH_OFF_HOVER__"); }
+QCheckBox#Switch::indicator:checked, QCheckBox#Switch::indicator:checked:hover { image: url("__SWITCH_ON__"); }
+QCheckBox#Switch::indicator:disabled { image: url("__SWITCH_DISABLED__"); }
 #Value { color: ${text}; font-size: 12pt; font-weight: 700; }
 
 /* Botones: contorno + tinte translúcido. Hover y pulsado suben el tinte un escalón (sin destellos). */
@@ -244,10 +266,12 @@ def _ui_asset(name: str, svg: str) -> str:
     """
     Escribe UNA vez un pequeño SVG de interfaz en la carpeta temporal y devuelve su ruta con «/»
     (formato de url() en QSS). El QSS no admite dibujar un chevron con bordes de forma fiable. Si no
-    se puede escribir, devuelve "" y el combo simplemente se queda sin flecha (no rompe nada).
+    se puede escribir, devuelve "" y el widget simplemente se queda sin imagen (no rompe nada). El
+    nombre lleva un hash del contenido: si cambia el tema, no se reutiliza un SVG antiguo en caché.
     """
     folder = os.path.join(tempfile.gettempdir(), "lozarus_ui")
-    path = os.path.join(folder, name)
+    stem, ext = os.path.splitext(name)
+    path = os.path.join(folder, f"{stem}-{hashlib.sha1(svg.encode('utf-8')).hexdigest()[:8]}{ext}")
     try:
         if not os.path.isfile(path):
             os.makedirs(folder, exist_ok=True)
@@ -258,11 +282,29 @@ def _ui_asset(name: str, svg: str) -> str:
     return path.replace("\\", "/")
 
 
-QSS = QSS.replace("__ARROW_DOWN__", _ui_asset(
-    "chevron-down-cosmos.svg",
-    '<svg xmlns="http://www.w3.org/2000/svg" width="10" height="10" viewBox="0 0 10 10">'
-    '<path d="M1.5 3.5 L5 7 L8.5 3.5" fill="none" stroke="#A9A5C4" stroke-width="1.6" '
-    'stroke-linecap="round" stroke-linejoin="round"/></svg>'))
+def _switch_svg(on: bool, track: str, stroke: str, knob: str) -> str:
+    """Interruptor 36×20: pista redondeada (degradado del acento si está activo) y mando circular."""
+    fill = "url(#g)" if on else track
+    return ('<svg xmlns="http://www.w3.org/2000/svg" width="36" height="20" viewBox="0 0 36 20">'
+            '<defs><linearGradient id="g" x1="0" y1="0" x2="1" y2="0">'
+            f'<stop offset="0" stop-color="{COLORS["accent"]}"/><stop offset="1" stop-color="{COLORS["accent_2"]}"/>'
+            '</linearGradient></defs>'
+            f'<rect x="0.5" y="0.5" width="35" height="19" rx="9.5" fill="{fill}" stroke="{stroke}"/>'
+            f'<circle cx="{26 if on else 10}" cy="10" r="6.5" fill="{knob}"/></svg>')
+
+
+for _token, _name, _svg in (
+        ("__ARROW_DOWN__", "chevron-down.svg",
+         '<svg xmlns="http://www.w3.org/2000/svg" width="10" height="10" viewBox="0 0 10 10">'
+         f'<path d="M1.5 3.5 L5 7 L8.5 3.5" fill="none" stroke="{COLORS["text2"]}" stroke-width="1.6" '
+         'stroke-linecap="round" stroke-linejoin="round"/></svg>'),
+        ("__SWITCH_OFF__", "switch-off.svg", _switch_svg(False, COLORS["card"], COLORS["border_hi"], COLORS["muted"])),
+        ("__SWITCH_OFF_HOVER__", "switch-off-hover.svg",
+         _switch_svg(False, COLORS["card"], COLORS["accent"], COLORS["text2"])),
+        ("__SWITCH_ON__", "switch-on.svg", _switch_svg(True, "", COLORS["accent_hover"], "#FFFFFF")),
+        ("__SWITCH_DISABLED__", "switch-disabled.svg",
+         _switch_svg(False, COLORS["panel"], COLORS["border"], COLORS["disabled"]))):
+    QSS = QSS.replace(_token, _ui_asset(_name, _svg))
 
 # Logo opcional de la barra de título (si no existe, chrome.TitleBar usa un icono de qtawesome).
 LOGO_PATH = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "assets", "logo.png")

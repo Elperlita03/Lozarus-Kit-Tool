@@ -330,6 +330,14 @@ class Toast(QFrame):
         self._life.setSingleShot(True)
         self._life.timeout.connect(self.dismiss)
 
+    @classmethod
+    def notify(cls, win, kind: str, title: str, text: str, icon_name: Optional[str] = None) -> "Toast":
+        """Aviso del resultado de una acción (no entra en el Centro de Alertas: no es un incidente)."""
+        toast = cls(win, {"when": dt.datetime.now(), "kind": kind, "title": title, "text": text,
+                          "icon": icon_name})
+        toast.slide_in()
+        return toast
+
     def slide_in(self) -> None:
         self.adjustSize()
         Toast._active.append(self)

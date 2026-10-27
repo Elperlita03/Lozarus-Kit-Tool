@@ -19,7 +19,7 @@ from PySide6.QtWidgets import (QAbstractItemView, QFrame, QHBoxLayout, QLabel, Q
                                QScrollArea, QTableWidget, QVBoxLayout, QWidget)
 
 from ui._compat import HAS_QTA, Event, ObservationQuality, qta
-from ui.theme import COLORS
+from ui.theme import COLORS, GLASS
 
 
 def icon(name: str, color: Optional[str] = None, disabled_color: Optional[str] = None,
@@ -115,9 +115,9 @@ class LzTable(QTableWidget):
         try:
             area = self.viewport().rect().adjusted(32, 0, -32, 0)
             if HAS_QTA:
-                pix = icon(self._empty_icon, "#3F3F46").pixmap(30, 30)
+                pix = icon(self._empty_icon, COLORS["faint"]).pixmap(30, 30)
                 p.drawPixmap(area.center().x() - 15, area.center().y() - 40, pix)
-            p.setPen(QColor("#71717A"))
+            p.setPen(QColor(COLORS["muted"]))
             font = p.font()
             font.setPointSize(10)
             p.setFont(font)
@@ -250,7 +250,7 @@ class Page(QWidget):
 class Gauge(QWidget):
     """Medidor circular dibujado con QPainter: pista gris, arco de color y porcentaje en el centro."""
 
-    def __init__(self, color="#60A5FA", size=132, thickness=11):
+    def __init__(self, color=COLORS["accent"], size=132, thickness=11):
         super().__init__()
         self.setFixedSize(size, size)
         self._value = 0.0
@@ -266,7 +266,7 @@ class Gauge(QWidget):
         p.setRenderHint(QPainter.RenderHint.Antialiasing)
         m = self._thickness / 2 + 4
         rect = QRectF(m, m, self.width() - 2 * m, self.height() - 2 * m)
-        track = QPen(QColor("#27272A"))
+        track = QPen(QColor(COLORS["panel_alt"]))
         track.setWidthF(self._thickness)
         track.setCapStyle(Qt.PenCapStyle.RoundCap)
         p.setPen(track)
@@ -277,8 +277,11 @@ class Gauge(QWidget):
             arc.setCapStyle(Qt.PenCapStyle.RoundCap)
             p.setPen(arc)
             p.drawArc(rect, 90 * 16, -int(360 * 16 * self._value / 100))
-        p.setPen(QColor("#FAFAFA"))
-        p.setFont(QFont("Segoe UI", 21, QFont.Weight.Bold))
+        p.setPen(QColor(COLORS["text"]))
+        font = QFont(self.font())  # tipografía de la aplicación (theme.base_font), no una fija
+        font.setPointSize(21)
+        font.setWeight(QFont.Weight.Bold)
+        p.setFont(font)
         p.drawText(rect, Qt.AlignmentFlag.AlignCenter, f"{self._value:.0f}%")
 
 
@@ -305,7 +308,7 @@ class BentoCard(QFrame):
         top.addWidget(ic)
         top.addStretch(1)
         self.dot = QLabel("●")
-        self.dot.setStyleSheet("color:#52525B; font-size:11px;")
+        self.dot.setStyleSheet(f"color:{COLORS['faint']}; font-size:11px;")
         top.addWidget(self.dot)
         lay.addLayout(top)
         t = QLabel(title)
@@ -330,7 +333,7 @@ class BentoCard(QFrame):
             return  # sin cambios: no re-aplicar estilos (cada setStyleSheet fuerza un re-polish)
         self._last = state
         active, text = state
-        self.dot.setStyleSheet(f"color:{'#22C55E' if active else '#52525B'}; font-size:11px;")
+        self.dot.setStyleSheet(f"color:{COLORS['ok'] if active else COLORS['faint']}; font-size:11px;")
         self.status.setText(text)
 
     def _get_border(self):
@@ -344,8 +347,8 @@ class BentoCard(QFrame):
 
     def _apply(self):
         c = self._border
-        self.setStyleSheet(f"#Bento {{ background:#18181C; border:1px solid "
-                           f"rgb({c.red()},{c.green()},{c.blue()}); border-radius:10px; }}")
+        self.setStyleSheet(f"#Bento {{ background:{GLASS['card']}; border:1px solid "
+                           f"rgb({c.red()},{c.green()},{c.blue()}); border-radius:14px; }}")
 
     def _to(self, color):
         self._anim.stop()
@@ -373,7 +376,7 @@ class PulseGraph(QWidget):
     RAM van en escala fija 0-100; la red se autoescala a su máximo reciente (se muestra su KB/s). Es
     ligero: guarda tres deques de 60 puntos y repinta en cada tic de 1 s.
     """
-    SERIES = [("CPU", "#60A5FA"), ("RAM", "#A78BFA"), ("RED", "#34D399")]
+    SERIES = [("CPU", COLORS["accent"]), ("RAM", COLORS["accent_2"]), ("RED", COLORS["ok"])]
 
     def __init__(self):
         super().__init__()
@@ -406,7 +409,7 @@ class PulseGraph(QWidget):
         p = QPainter(self)
         p.setRenderHint(QPainter.RenderHint.Antialiasing)
         w, h, pad = self.width(), self.height(), 8
-        p.setPen(QPen(QColor("#1F1F27"), 1))
+        p.setPen(QPen(QColor(COLORS["panel_alt"]), 1))
         for frac in (0.0, 0.5, 1.0):   # rejilla horizontal tenue
             y = pad + frac * (h - 2 * pad)
             p.drawLine(int(pad), int(y), int(w - pad), int(y))
@@ -443,7 +446,7 @@ class HealthBadge(QFrame):
         cap = QLabel("SALUD")
         cap.setObjectName("ChipCap")
         self.value = QLabel("—")
-        self.value.setStyleSheet("color:#FAFAFA; font-size:28px; font-weight:bold;")
+        self.value.setStyleSheet(f"color:{COLORS['text']}; font-size:28px; font-weight:bold;")
         self.label = QLabel("")
         self.label.setObjectName("Tiny")
         lay.addWidget(cap)
@@ -455,7 +458,7 @@ class HealthBadge(QFrame):
             self.value.setText("—")
             self.label.setText("calculando…")
             return
-        color = "#10B981" if score >= 85 else "#F59E0B" if score >= 60 else "#EF4444"
+        color = COLORS["ok"] if score >= 85 else COLORS["warn"] if score >= 60 else COLORS["danger"]
         self.value.setText(str(score))
         self.value.setStyleSheet(f"color:{color}; font-size:30px; font-weight:bold;")
         self.label.setText(etiqueta)

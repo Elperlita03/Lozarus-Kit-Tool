@@ -61,7 +61,7 @@ from modulos._utilidades import is_admin, request_admin_relaunch  # noqa: E402
 
 from ui._compat import (HAS_BLACKBOX, HAS_HONEYPOT, CajaNegra, EventBus, HoneypotEngine,  # noqa: E402
                         TacticalConfig)
-from ui.theme import APP_NAME, COLORS, NAV_ICONS, QSS, base_font  # noqa: E402
+from ui.theme import APP_NAME, COLORS, GLASS, NAV_ICONS, QSS, base_font  # noqa: E402
 from ui.widgets import _ORPHAN_WORKERS, Worker, icon, with_icon  # noqa: E402
 from ui.dialogs import ConfirmDialog, ResetConfirmDialog  # noqa: E402
 from ui.chrome import AlertCenter, ConsolePanel, EdgeResizer, TitleBar, Toast  # noqa: E402
@@ -116,7 +116,7 @@ class NavButton(QPushButton):
         self.setStyleSheet(
             f"QPushButton#NavButton {{ background-color: rgba({c.red()},{c.green()},{c.blue()},{c.alpha()});"
             f" text-align: left; padding-left: 14px; border: none; border-radius: 8px;"
-            f" color: {'#FAFAFA' if self._active else '#A1A1AA'}; font-size: 13px; }}")
+            f" color: {COLORS['text'] if self._active else COLORS['text2']}; font-size: 10pt; }}")
 
     def _to(self, color: QColor) -> None:
         self._anim.stop()
@@ -128,11 +128,11 @@ class NavButton(QPushButton):
         self._active = on
         self._apply()
         self._refresh_icon()
-        self._to(QColor(30, 38, 51, 255) if on else QColor(0, 0, 0, 0))  # accent_soft #1E2633
+        self._to(QColor(COLORS["accent_soft"]) if on else QColor(0, 0, 0, 0))
 
     def enterEvent(self, event) -> None:
         if not self._active:
-            self._to(QColor(39, 39, 42, 255))  # panel_alt #27272A
+            self._to(QColor(COLORS["panel_alt"]))
         super().enterEvent(event)
 
     def leaveEvent(self, event) -> None:
@@ -221,7 +221,7 @@ class HoldButton(QPushButton):
         if self._fill > 0:  # barra de progreso del «hold» en el borde inferior
             p = QPainter(self)
             p.setPen(Qt.PenStyle.NoPen)
-            p.setBrush(QColor("#60A5FA"))
+            p.setBrush(QColor(COLORS["accent"]))
             p.drawRect(0, self.height() - 3, int(self.width() * self._fill), 3)
 
 
@@ -692,8 +692,9 @@ class MainWindow(QMainWindow):
             self.quarantine_btn.setText("LEVANTAR CUARENTENA")
             with_icon(self.quarantine_btn, "fa5s.unlock", COLORS["accent"])
             self.quarantine_btn.setStyleSheet(
-                "QPushButton{background:#1E2633;color:#FAFAFA;border:1px solid #60A5FA;border-radius:8px;"
-                "padding:10px 14px;font-weight:bold;font-size:13px;} QPushButton:hover{background:#60A5FA;color:#0B0B0E;}")
+                f"QPushButton{{background:{GLASS['selected']};color:{COLORS['text']};border:1px solid {COLORS['accent']};"
+                "border-radius:9px;padding:10px 14px;font-weight:bold;font-size:10pt;}"
+                f" QPushButton:hover{{background:{COLORS['accent']};color:{COLORS['bg']};}}")
             self.quarantine_status.setText("● CUARENTENA ACTIVA")
         else:
             self.quarantine_btn.setText("CUARENTENA ABSOLUTA")
