@@ -219,6 +219,7 @@ class Toast(QFrame):
     Aviso in-app no intrusivo: una tarjeta que aparece abajo a la derecha, se apila con las demás,
     se auto-descarta a los ~7 s y ofrece acciones rápidas (Ir al módulo / Confiar / Descartar). No
     bloquea nada: el evento ya está en la consola y en la Caja Negra; esto es solo un recordatorio.
+    `entry` admite `title` e `icon` opcionales (por defecto, «Alerta de seguridad»).
     """
     KIND_COLOR = {"!": "#F59E0B", "x": "#EF4444", "*": "#22C55E", "~": "#60A5FA", "+": "#60A5FA"}
     _active: list = []
@@ -239,8 +240,8 @@ class Toast(QFrame):
         top = QHBoxLayout()
         top.setSpacing(8)
         ic = QLabel()
-        ic.setPixmap(icon("fa5s.exclamation-circle", color).pixmap(16, 16))
-        head = QLabel("Alerta de seguridad")
+        ic.setPixmap(icon(entry.get("icon") or "fa5s.exclamation-circle", color).pixmap(16, 16))
+        head = QLabel(entry.get("title") or "Alerta de seguridad")
         head.setStyleSheet(f"color:{color}; font-weight:bold; font-size:12px;")
         close = QPushButton("✕")
         close.setObjectName("ToastClose")

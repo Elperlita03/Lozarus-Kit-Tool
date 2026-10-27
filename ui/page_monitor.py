@@ -1,7 +1,9 @@
 """
 ui/page_monitor.py · LOZARUS KIT TOOL
 
-Página MONITOR EN VIVO: conexiones de red y tablero de procesos sospechosos en tiempo real.
+Página MONITOR EN VIVO: conexiones de red y tablero de procesos sospechosos en tiempo real, con
+controles directos sobre los procesos (menú contextual «Navaja Suiza»: finalizar, suspender,
+reanudar y confiar).
 """
 
 from __future__ import annotations
@@ -12,9 +14,10 @@ import socket
 from collections import deque
 from typing import TYPE_CHECKING
 
+import psutil
 from PySide6.QtCore import Property, QEasingCurve, QPointF, QPropertyAnimation, QTimer, Qt
 from PySide6.QtGui import QBrush, QColor, QPainter, QPainterPath, QPen, QPolygonF
-from PySide6.QtWidgets import (QComboBox, QFrame, QHBoxLayout, QLabel, QLineEdit, QPushButton,
+from PySide6.QtWidgets import (QComboBox, QFrame, QHBoxLayout, QLabel, QLineEdit, QMenu, QPushButton,
                                QScrollArea, QTabWidget, QTableWidgetItem, QVBoxLayout, QWidget)
 
 from modulos._base import CRITICAL
@@ -25,9 +28,10 @@ from modulos._tacticas import launch_in_sandbox, sandbox_available
 
 from ui._compat import Event, ObservationQuality
 from ui.theme import COLORS, SEVERITY_COLORS
-from ui.widgets import (Page, format_bytes, frozen, icon, make_table, repolish, set_busy, stat_chip,
-                        with_icon)
+from ui.widgets import (Page, _emit_event, format_bytes, frozen, icon, make_table, repolish, set_busy,
+                        stat_chip, with_icon)
 from ui.dialogs import ConfirmDialog
+from ui.chrome import Toast
 
 if TYPE_CHECKING:  # solo para las anotaciones; en ejecución evita el import circular
     from gui_qt import MainWindow
@@ -36,6 +40,173 @@ if TYPE_CHECKING:  # solo para las anotaciones; en ejecución evita el import ci
 def proc_key(alert) -> str:
     """Identidad estable de un proceso marcado (PID + instante de creación)."""
     return f"{alert.pid}:{int(getattr(alert, 'created', 0) * 1000)}"
+
+
+# ===========================================================================
+# NAVAJA SUIZA: controles REALES (psutil) sobre un proceso, desde el menú contextual
+# ===========================================================================
+# Procesos cuyo cierre o congelación tumba Windows (pantallazo azul) o deja el escritorio sin
+# pintar: el menú no los ofrece aunque Lozarus corra como Administrador. Se comparan por nombre.
+PROTECTED_PROCS = frozenset({"system", "secure system", "registry", "memory compression", "smss.exe",
+                             "csrss.exe", "wininit.exe", "winlogon.exe", "services.exe", "lsass.exe",
+                             "dwm.exe"})
+# acción -> (texto del menú, icono, color, infinitivo y participio para los mensajes)
+PROC_ACTIONS = {
+    "terminate": ("Finalizar tarea", "fa5s.times-circle", "#EF4444", "finalizar", "finalizado"),
+    "suspend": ("Suspender", "fa5s.pause-circle", "#F59E0B", "suspender", "suspendido"),
+    "resume": ("Reanudar", "fa5s.play-circle", "#22C55E", "reanudar", "reanudado"),
+    "trust": ("Confiar (lista blanca)", "fa5s.user-check", "#60A5FA", "confiar en", "de confianza"),
+}
+# En Windows cada suspensión se acumula (hay que reanudar tantas veces como se suspendió): se
+# recuerda qué procesos suspendió Lozarus para no ofrecer «Suspender» dos veces seguidas.
+_SUSPENDED: set = set()  # (pid, create_time)
+MENU_QSS = (f"QMenu {{ background:{COLORS['card']}; border:1px solid {COLORS['border']}; border-radius:8px;"
+            f" padding:6px; color:{COLORS['text']}; }}"
+            "QMenu::item { padding:6px 18px 6px 8px; border-radius:6px; }"
+            f"QMenu::item:selected {{ background:{COLORS['accent_soft']}; }}"
+            f"QMenu::item:disabled {{ color:{COLORS['faint']}; }}"
+            f"QMenu::separator {{ height:1px; background:{COLORS['border']}; margin:4px 6px; }}")
+
+
+def _toast(app, kind: str, title: str, text: str, icon_name: str) -> None:
+    """Aviso in-app del resultado (no entra en el Centro de Alertas: lo ha pedido el usuario)."""
+    Toast(app, {"when": dt.datetime.now(), "kind": kind, "title": title, "text": text,
+                "icon": icon_name}).slide_in()
+
+
+def _identity(proc) -> tuple:
+    try:
+        return proc.pid, proc.create_time()
+    except psutil.Error:
+        return proc.pid, None
+
+
+def _same_process(proc, name, created) -> bool:
+    """Evita actuar sobre un PID reutilizado: compara nombre e instante de creación con la muestra."""
+    try:
+        if created and abs(proc.create_time() - created) > 1.0:
+            return False
+        return not name or proc.name().lower() == name.lower()
+    except psutil.AccessDenied:
+        return True  # sin permiso para leerlo; psutil vuelve a validar la identidad al actuar
+
+
+def _report(app, action: str, pid: int, name, ok: bool, title: str, text: str, icon_name: str) -> bool:
+    """Deja el resultado en la consola, en la Caja Negra (vía bus) y en un Toast. Devuelve ok."""
+    app.console.log("*" if ok else "x", f"{PROC_ACTIONS[action][0]}: {text}")
+    _emit_event(app, source="monitor:control", event_type=f"process.{action}",
+                payload={"pid": pid, "name": name, "ok": ok, "detail": text}, process_id=pid)
+    _toast(app, "*" if ok else "x", title, text, icon_name)
+    return ok
+
+
+def _control_process(app, proc, action: str, name) -> bool:
+    """Finaliza, suspende o reanuda el proceso con psutil. Devuelve True si se aplicó."""
+    text, _icon, _color, infinitive, participle = PROC_ACTIONS[action]
+    label = f"«{name or '?'}» (PID {proc.pid})"
+    if action == "terminate" and not ConfirmDialog.ask(
+            app, "Finalizar tarea", f"Se cerrará {label} de inmediato: perderá el trabajo que no haya "
+            "guardado y no se puede deshacer. ¿Continuar?", confirm_text="Finalizar tarea", danger=True):
+        return False
+    key = _identity(proc)
+    app.log_tactical(f"{text}: {label}")
+    try:
+        {"terminate": proc.terminate, "suspend": proc.suspend, "resume": proc.resume}[action]()
+    except psutil.AccessDenied:
+        if getattr(app, "admin", False):
+            title, hint = "Acceso denegado", "Windows protege este proceso incluso frente a un Administrador."
+        else:
+            title, hint = "Se requiere elevación", "Ejecuta Lozarus como Administrador y vuelve a intentarlo."
+        return _report(app, action, proc.pid, name, False, title,
+                       f"Acceso denegado al {infinitive} {label}. {hint}", "fa5s.user-shield")
+    except psutil.NoSuchProcess:  # incluye ZombieProcess y el PID reutilizado (psutil lo detecta)
+        _SUSPENDED.discard(key)
+        return _report(app, action, proc.pid, name, False, "Proceso no encontrado",
+                       f"{label} ya no existe.", "fa5s.exclamation-triangle")
+    except (psutil.Error, OSError) as exc:
+        return _report(app, action, proc.pid, name, False, "Acción no aplicada",
+                       f"No se pudo {infinitive} {label}: {exc}", "fa5s.exclamation-triangle")
+    if action == "suspend":
+        _SUSPENDED.add(key)
+    else:
+        _SUSPENDED.discard(key)
+    return _report(app, action, proc.pid, name, True, text, f"{label} {participle}.", "fa5s.check-circle")
+
+
+def _trust_process(app, pid: int, name: str) -> bool:
+    """Lista blanca por NOMBRE de ejecutable: MainWindow.trust_process aplica add_trusted
+    (modulos._listablanca) y la persiste; el monitor y el Centinela dejan de alertar por él."""
+    app.trust_process(name)
+    if not app.is_process_trusted(name):
+        return _report(app, "trust", pid, name, False, "Lista blanca no disponible",
+                       f"Sin persistencia táctica: no se pudo guardar «{name}».", "fa5s.database")
+    return _report(app, "trust", pid, name, True, "Añadido a la lista blanca",
+                   f"«{name}» no volverá a generar alertas del monitor.", "fa5s.user-check")
+
+
+def process_menu(app, parent, global_pos, pid, name=None, *, status=None, created=None,
+                 on_done=None) -> None:
+    """
+    Menú contextual «Navaja Suiza» sobre un proceso: Finalizar tarea (con confirmación),
+    Suspender, Reanudar y Confiar. Acciones REALES con psutil; el resultado o el motivo del fallo
+    (p. ej. falta de elevación) se avisa con un Toast. Lozarus y los procesos críticos de Windows
+    no se pueden finalizar ni suspender. `on_done` se llama tras una acción aplicada.
+    """
+    if pid is None:
+        return
+    try:
+        proc = psutil.Process(pid)
+        same = _same_process(proc, name, created)
+    except psutil.NoSuchProcess:
+        _toast(app, "x", "Proceso no encontrado", f"«{name or '?'}» (PID {pid}) ya no existe.",
+               "fa5s.exclamation-triangle")
+        return
+    except (psutil.Error, OSError) as exc:
+        _toast(app, "x", "Control de procesos", f"No se pudo abrir el PID {pid}: {exc}",
+               "fa5s.exclamation-triangle")
+        return
+    if not same:
+        _toast(app, "!", "Control de procesos", f"El PID {pid} ya pertenece a otro proceso; espera a la "
+               "siguiente muestra.", "fa5s.exclamation-triangle")
+        return
+
+    own = pid == os.getpid()
+    protected = own or pid in (0, 4) or (name or "").lower() in PROTECTED_PROCS
+    menu = QMenu(parent)
+    menu.setStyleSheet(MENU_QSS)
+    menu.setToolTipsVisible(True)
+    head = menu.addAction(f"{name or 'Proceso'}  ·  PID {pid}")
+    head.setEnabled(False)
+    menu.addSeparator()
+    acts = {}
+    for key, (text, icon_name, color, _inf, _part) in PROC_ACTIONS.items():
+        if key == "trust":
+            menu.addSeparator()
+        acts[key] = menu.addAction(icon(icon_name, color, COLORS["faint"]), text)
+
+    def block(key, why):
+        acts[key].setEnabled(False)
+        acts[key].setToolTip(why)
+
+    if protected:
+        why = ("Es el propio Lozarus." if own else
+               "Proceso crítico de Windows: cerrarlo o congelarlo tumba el sistema.")
+        for key in ("terminate", "suspend", "resume") if own else ("terminate", "suspend"):
+            block(key, why)
+    elif status == psutil.STATUS_STOPPED or _identity(proc) in _SUSPENDED:
+        block("suspend", "Ya está suspendido: usa «Reanudar».")
+    if not name:
+        block("trust", "Nombre de ejecutable no accesible.")
+    elif app.is_process_trusted(name):
+        block("trust", "Ya está en la lista blanca.")
+
+    chosen = menu.exec(global_pos)
+    key = next((k for k, a in acts.items() if a is chosen), None)
+    if key is None:
+        return
+    done = _trust_process(app, pid, name) if key == "trust" else _control_process(app, proc, key, name)
+    if done and on_done is not None:
+        on_done()
 
 
 class Sparkline(QWidget):
@@ -94,11 +265,12 @@ class Sparkline(QWidget):
 class ProcCard(QFrame):
     """Tarjeta de un proceso sospechoso con sparklines de CPU y RAM y hover/selección animados (Aura)."""
 
-    def __init__(self, on_select):
+    def __init__(self, on_select, on_menu=None):
         super().__init__()
         self.setObjectName("ProcCard")
         self.setCursor(Qt.CursorShape.PointingHandCursor)
         self._on_select = on_select
+        self._on_menu = on_menu  # clic derecho: menú «Navaja Suiza» sobre el proceso
         self.alert = None
         self._selected = False
         self._border = QColor(COLORS["border"])
@@ -194,6 +366,10 @@ class ProcCard(QFrame):
             self._on_select(self.alert)
         super().mousePressEvent(event)
 
+    def contextMenuEvent(self, event):
+        if self.alert is not None and self._on_menu is not None:
+            self._on_menu(self.alert, event.globalPos())
+
     def update_data(self, alert, cpu_hist, ram_hist):
         self.alert = alert
         color = SEVERITY_COLORS[alert.severity]
@@ -211,12 +387,13 @@ class ProcCard(QFrame):
 class ProcBoard(QScrollArea):
     """Lista de tarjetas de procesos sospechosos, actualizadas por diferencias (crea/actualiza/borra)."""
 
-    def __init__(self, on_select):
+    def __init__(self, on_select, on_menu=None):
         super().__init__()
         self.setWidgetResizable(True)
         self.setFrameShape(QFrame.Shape.NoFrame)
         self.setStyleSheet("background: transparent;")
         self.on_select = on_select
+        self.on_menu = on_menu
         self.cards = {}
         self.order = []
         self.selected_key = None
@@ -240,7 +417,7 @@ class ProcBoard(QScrollArea):
         for a, key in zip(alerts, keys):
             card = self.cards.get(key)
             if card is None:
-                card = ProcCard(self._select_from_card)
+                card = ProcCard(self._select_from_card, self._menu_from_card)
                 self.cards[key] = card
             hist = history.get(key, {})
             card.update_data(a, list(hist.get("cpu", [])), list(hist.get("rss", [])))
@@ -259,13 +436,19 @@ class ProcBoard(QScrollArea):
             card.set_selected(key == self.selected_key)
         self.on_select(alert)
 
+    def _menu_from_card(self, alert, global_pos):
+        self._select_from_card(alert)  # también con la tecla de menú, que no pasa por el clic
+        if self.on_menu is not None:
+            self.on_menu(alert, global_pos)
+
 
 class ProcessMonitor(QWidget):
     """
-    Tabla de procesos EN VIVO (solo observación): PID, nombre, usuario, CPU %, memoria y estado.
-    Muestreo en segundo plano (self.app.run_task) con intervalo configurable; búsqueda por nombre o
-    PID, ordenación por columnas y panel de detalle del proceso seleccionado. No termina procesos ni
-    cambia prioridades: solo observa. Los valores no accesibles se muestran «—», nunca como 0.
+    Tabla de procesos EN VIVO: PID, nombre, usuario, CPU %, memoria y estado. Muestreo en segundo
+    plano (self.app.run_task) con intervalo configurable; búsqueda por nombre o PID, ordenación por
+    columnas y panel de detalle del proceso seleccionado. Clic derecho sobre una fila: menú «Navaja
+    Suiza» (process_menu) para finalizar, suspender, reanudar o confiar en el proceso. Los valores
+    no accesibles se muestran «—», nunca como 0.
     """
 
     COLS = [("pid", "PID", 72), ("name", "Nombre", 230), ("user", "Usuario", 150),
@@ -329,6 +512,8 @@ class ProcessMonitor(QWidget):
         self._update_sort_indicator()
         hh.sectionClicked.connect(self._header_clicked)
         self.table.itemSelectionChanged.connect(self._selection_changed)
+        self.table.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self.table.customContextMenuRequested.connect(self._context_menu)
         body.addWidget(self.table, 3)
 
         detail_box = QFrame()
@@ -476,6 +661,17 @@ class ProcessMonitor(QWidget):
                 self.table.blockSignals(False)
                 return
 
+    def _context_menu(self, pos) -> None:
+        item = self.table.itemAt(pos)
+        if item is None:
+            return
+        self.table.selectRow(item.row())
+        pid_item = self.table.item(item.row(), 0)
+        pid = pid_item.data(Qt.ItemDataRole.UserRole) if pid_item else None
+        row = next((r for r in self._rows if r.pid == pid), None)
+        process_menu(self.app, self, self.table.viewport().mapToGlobal(pos), pid,
+                     row.name if row else None, status=row.status if row else None, on_done=self._tick)
+
     def _header_clicked(self, index: int) -> None:
         key = self.COLS[index][0]
         if key == self._sort_key:
@@ -543,8 +739,9 @@ class ProcessMonitor(QWidget):
 
 
 class MonitorPage(Page):
-    """Radar en tiempo real (solo lectura): conexiones de red y procesos sospechosos. Muestra en
-    un hilo cada 3 s (LiveMonitor.sample) para no congelar la interfaz."""
+    """Radar en tiempo real: conexiones de red y procesos sospechosos. Muestra en un hilo cada 3 s
+    (LiveMonitor.sample) para no congelar la interfaz. Las pestañas de procesos ofrecen el menú
+    contextual «Navaja Suiza» (finalizar, suspender, reanudar, confiar)."""
 
     def __init__(self, app: "MainWindow"):
         super().__init__("Monitor en Vivo",
@@ -596,9 +793,9 @@ class MonitorPage(Page):
                                       "Estado", "Destino"], widths=[170, 70, 130, 70, 130, 70, 110],
                                      empty="Inicia el monitor para ver las conexiones de red en tiempo "
                                            "real.", empty_icon="fa5s.wave-square")
-        self.board = ProcBoard(self._on_proc_select)
+        self.board = ProcBoard(self._on_proc_select, self._proc_menu)
         self.history = {}  # proceso -> {cpu: deque, rss: deque} de los últimos ~20 s (sparklines)
-        self.proc_monitor = ProcessMonitor(app)  # tabla general de procesos (observación)
+        self.proc_monitor = ProcessMonitor(app)  # tabla general de procesos (con menú contextual)
         self.tabs.addTab(self.proc_monitor, icon("fa5s.microchip"), "Procesos del sistema")
         self.tabs.addTab(self.conn_table, icon("fa5s.network-wired"), "Conexiones de red")
         self.tabs.addTab(self.board, icon("fa5s.bug"), "Procesos sospechosos")
@@ -750,6 +947,16 @@ class MonitorPage(Page):
         self.autopsy_btn.setEnabled(has_file)
         self.forensic_btn.setEnabled(True)
         self.trust_btn.setEnabled(True)
+
+    def _proc_menu(self, alert, global_pos) -> None:
+        process_menu(self.app, self, global_pos, alert.pid, alert.name,
+                     created=getattr(alert, "created", None) or None,
+                     on_done=lambda: self._after_control(alert))
+
+    def _after_control(self, alert) -> None:
+        if self.selected is alert:
+            self._on_proc_select(alert)  # refresca la etiqueta «DE CONFIANZA» del detalle
+        self._tick()  # nueva muestra: el proceso finalizado desaparece del tablero
 
     def _send_to_autopsy(self) -> None:
         a = self.selected
