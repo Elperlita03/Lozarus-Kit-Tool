@@ -14,7 +14,7 @@ Uso:  python gui_qt.py        (como Administrador para la auditoría completa y 
 
 Incluye:
   · Ventana sin marco (FramelessWindowHint) con barra de título propia y arrastrable.
-  · Tema oscuro en QSS (negro profundo, azul Lozarus #0078D7).
+  · Tema «Dark Cosmos Glass» en QSS (degradados estáticos y tarjetas translúcidas, sin animar).
   · Hover suave del menú lateral con QPropertyAnimation.
   · Worker(QThread): clase base para correr diagnósticos / PowerShell en segundo plano sin
     congelar la interfaz (comunica por señales, que Qt entrega al hilo de la UI de forma segura).
@@ -61,7 +61,7 @@ from modulos._utilidades import is_admin, request_admin_relaunch  # noqa: E402
 
 from ui._compat import (HAS_BLACKBOX, HAS_HONEYPOT, CajaNegra, EventBus, HoneypotEngine,  # noqa: E402
                         TacticalConfig)
-from ui.theme import APP_NAME, COLORS, NAV_ICONS, QSS  # noqa: E402
+from ui.theme import APP_NAME, COLORS, NAV_ICONS, QSS, base_font  # noqa: E402
 from ui.widgets import _ORPHAN_WORKERS, Worker, icon, with_icon  # noqa: E402
 from ui.dialogs import ConfirmDialog, ResetConfirmDialog  # noqa: E402
 from ui.chrome import AlertCenter, ConsolePanel, EdgeResizer, TitleBar, Toast  # noqa: E402
@@ -870,6 +870,7 @@ class MainWindow(QMainWindow):
 
 def main() -> None:
     app = QApplication(sys.argv)
+    app.setFont(base_font())  # tipografía corporativa (el QSS solo ajusta jerarquías)
     app.setStyleSheet(QSS)
     win = MainWindow()
     win.show()

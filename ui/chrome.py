@@ -9,21 +9,63 @@ from __future__ import annotations
 
 import datetime as dt
 import html
+import os
 from collections import deque
 from typing import Optional
 
-from PySide6.QtCore import QEvent, QObject, QRect, QSize, QTimer, Qt
-from PySide6.QtGui import QFont
+from PySide6.QtCore import QEvent, QObject, QPointF, QRect, QRectF, QSize, QTimer, Qt
+from PySide6.QtGui import QColor, QFont, QGuiApplication, QLinearGradient, QPainter, QPixmap
 from PySide6.QtWidgets import (QFrame, QHBoxLayout, QLabel, QMainWindow, QPlainTextEdit,
                                QPushButton, QScrollArea, QVBoxLayout, QWidget)
 
 from ui._compat import HAS_QTA, qta
-from ui.theme import COLORS
+from ui.theme import COLORS, LOGO_PATH
 from ui.widgets import icon, with_icon
 
 
+def _logo_pixmap(height: int) -> Optional[QPixmap]:
+    """assets/logo.png escalado (nítido en pantallas HiDPI) a la altura dada; None si no hay logo."""
+    if not os.path.isfile(LOGO_PATH):
+        return None
+    pix = QPixmap(LOGO_PATH)
+    if pix.isNull():
+        return None
+    dpr = QGuiApplication.instance().devicePixelRatio() if QGuiApplication.instance() else 1.0
+    pix = pix.scaledToHeight(round(height * dpr), Qt.TransformationMode.SmoothTransformation)
+    pix.setDevicePixelRatio(dpr)
+    return pix
+
+
+def _cosmic_icon(name: str, size: int) -> Optional[QPixmap]:
+    """
+    Icono de qtawesome teñido con el degradado azul eléctrico → violeta del tema. Se pinta UNA sola
+    vez al crear la barra (QPainter en modo SourceIn): ningún coste por fotograma.
+    """
+    base = icon(name, "#FFFFFF").pixmap(size, size)
+    if base.isNull():
+        return None
+    out = QPixmap(base.size())
+    out.setDevicePixelRatio(base.devicePixelRatio())
+    out.fill(Qt.GlobalColor.transparent)
+    area = QRectF(QPointF(0, 0), base.deviceIndependentSize())
+    grad = QLinearGradient(area.topLeft(), area.bottomRight())
+    grad.setColorAt(0.0, QColor(COLORS["accent"]))
+    grad.setColorAt(1.0, QColor(COLORS["accent_2"]))
+    p = QPainter(out)
+    p.drawPixmap(0, 0, base)
+    p.setCompositionMode(QPainter.CompositionMode.CompositionMode_SourceIn)
+    p.fillRect(area, grad)
+    p.end()
+    return out
+
+
 class TitleBar(QFrame):
-    """Barra de título propia (la ventana es sin marco): logo, nombre y botones minimizar/cerrar."""
+    """
+    Barra de título propia (la ventana es sin marco): marca, campana de alertas y botones de
+    ventana. La marca usa assets/logo.png si existe; si es un logotipo apaisado (ya trae el nombre)
+    va solo, y si es un símbolo va seguido del nombre. Sin logo: meteorito de qtawesome con el
+    degradado del tema + «LOZARUS | KIT TOOL».
+    """
 
     def __init__(self, window: QMainWindow):
         super().__init__()
@@ -34,14 +76,22 @@ class TitleBar(QFrame):
         lay = QHBoxLayout(self)
         lay.setContentsMargins(20, 0, 10, 0)
         lay.setSpacing(12)
-        logo = QLabel()
-        logo.setPixmap(icon("fa5s.shield-alt", COLORS["accent"]).pixmap(26, 26))
-        brand = QLabel("LOZARUS")
-        brand.setObjectName("Brand")
-        sub = QLabel("KIT TOOL")
-        sub.setObjectName("BrandSub")
-        for w in (logo, brand, sub):
-            lay.addWidget(w)
+        logo = _logo_pixmap(30)
+        mark = QLabel()
+        mark.setObjectName("BrandMark")
+        mark.setPixmap(logo if logo is not None else (_cosmic_icon("fa5s.meteor", 24) or QPixmap()))
+        mark.setVisible(not mark.pixmap().isNull())
+        lay.addWidget(mark)
+        if logo is None or logo.width() < logo.height() * 1.6:  # sin logotipo con nombre: wordmark
+            brand = QLabel("LOZARUS")
+            brand.setObjectName("Brand")
+            divider = QFrame()
+            divider.setObjectName("BrandDivider")
+            divider.setFixedSize(1, 16)
+            sub = QLabel("KIT TOOL")
+            sub.setObjectName("BrandSub")
+            for w in (brand, divider, sub):
+                lay.addWidget(w)
         lay.addStretch(1)
         # Campana de alertas (el panel y el contador se cablean en MainWindow).
         self.alert_btn = QPushButton("")
@@ -97,8 +147,8 @@ class TelemetryConsole(QPlainTextEdit):
     etiqueta de sistema coloreada por tipo (azul hielo para [+]/[TACTICAL]) y mensaje en blanco hueso;
     el rojo se reserva para errores/alertas críticas. Auto-scroll al final.
     """
-    KIND = {"+": "#60A5FA", "~": "#A1A1AA", "*": "#22C55E", "!": "#F59E0B", "x": "#EF4444",
-            "TACTICAL": "#60A5FA"}
+    KIND = {"+": COLORS["accent"], "~": COLORS["text2"], "*": COLORS["ok"], "!": COLORS["warn"],
+            "x": COLORS["danger"], "TACTICAL": COLORS["accent"]}
 
     def __init__(self):
         super().__init__()
@@ -108,11 +158,11 @@ class TelemetryConsole(QPlainTextEdit):
         self.setFont(QFont("Consolas", 10))
 
     def log(self, kind: str, text: str) -> None:
-        tag = self.KIND.get(kind, "#A1A1AA")
-        msg = "#EF4444" if kind == "x" else "#FAFAFA"  # rojo solo para errores/alertas críticas
+        tag = self.KIND.get(kind, COLORS["text2"])
+        msg = COLORS["danger"] if kind == "x" else COLORS["text"]  # rojo solo para errores/alertas críticas
         when = dt.datetime.now().strftime("%H:%M:%S")
         safe = html.escape(text.rstrip())
-        self.appendHtml(f'<span style="color:#71717A">[{when}]</span> '
+        self.appendHtml(f'<span style="color:{COLORS["muted"]}">[{when}]</span> '
                         f'<span style="color:{tag}">[{kind}]</span> '
                         f'<span style="color:{msg}">{safe}</span>')
         self.verticalScrollBar().setValue(self.verticalScrollBar().maximum())  # auto-scroll al final
@@ -221,7 +271,8 @@ class Toast(QFrame):
     bloquea nada: el evento ya está en la consola y en la Caja Negra; esto es solo un recordatorio.
     `entry` admite `title` e `icon` opcionales (por defecto, «Alerta de seguridad»).
     """
-    KIND_COLOR = {"!": "#F59E0B", "x": "#EF4444", "*": "#22C55E", "~": "#60A5FA", "+": "#60A5FA"}
+    KIND_COLOR = {"!": COLORS["warn"], "x": COLORS["danger"], "*": COLORS["ok"], "~": COLORS["accent"],
+                  "+": COLORS["accent"]}
     _active: list = []
     LIFE_MS = 7000
 
@@ -230,9 +281,9 @@ class Toast(QFrame):
         self.win = win
         self.entry = entry
         self.setObjectName("Toast")
-        color = self.KIND_COLOR.get(entry.get("kind"), "#60A5FA")
-        self.setStyleSheet("#Toast { background:#18181F; border:1px solid #2E2E38; border-left:3px solid "
-                           + color + "; border-radius:10px; }")
+        color = self.KIND_COLOR.get(entry.get("kind"), COLORS["accent"])
+        self.setStyleSheet(f"#Toast {{ background: rgba(16, 14, 30, 0.96); border:1px solid {COLORS['border_hi']};"
+                           f" border-left:3px solid {color}; border-radius:12px; }}")
         self.setFixedWidth(348)
         lay = QVBoxLayout(self)
         lay.setContentsMargins(14, 12, 12, 12)
@@ -242,7 +293,7 @@ class Toast(QFrame):
         ic = QLabel()
         ic.setPixmap(icon(entry.get("icon") or "fa5s.exclamation-circle", color).pixmap(16, 16))
         head = QLabel(entry.get("title") or "Alerta de seguridad")
-        head.setStyleSheet(f"color:{color}; font-weight:bold; font-size:12px;")
+        head.setStyleSheet(f"color:{color}; font-weight:700; font-size:10pt; letter-spacing:0.3px;")
         close = QPushButton("✕")
         close.setObjectName("ToastClose")
         close.setFixedSize(20, 20)
@@ -254,7 +305,7 @@ class Toast(QFrame):
         top.addWidget(close)
         lay.addLayout(top)
         body = QLabel(entry.get("text", ""))
-        body.setStyleSheet("color:#D4D4D8; font-size:12px;")
+        body.setStyleSheet(f"color:{COLORS['text']}; font-size:10pt;")
         body.setWordWrap(True)
         lay.addWidget(body)
         actions = QHBoxLayout()
@@ -326,7 +377,8 @@ class AlertCenter(QFrame):
         super().__init__(win)
         self.win = win
         self.setObjectName("AlertCenter")
-        self.setStyleSheet("#AlertCenter { background:#121217; border:1px solid #2E2E38; border-radius:12px; }")
+        self.setStyleSheet(f"#AlertCenter {{ background: rgba(14, 12, 26, 0.97); border:1px solid {COLORS['border_hi']};"
+                           " border-radius:14px; }")
         self.setFixedWidth(410)
         lay = QVBoxLayout(self)
         lay.setContentsMargins(14, 12, 14, 12)
@@ -383,9 +435,11 @@ class AlertCenter(QFrame):
             self._list.insertWidget(self._list.count() - 1, self._row(entry))
 
     def _row(self, entry: dict) -> QFrame:
-        color = Toast.KIND_COLOR.get(entry.get("kind"), "#60A5FA")
+        color = Toast.KIND_COLOR.get(entry.get("kind"), COLORS["accent"])
         row = QFrame()
-        row.setStyleSheet("background:#18181F; border:1px solid #272730; border-radius:8px;")
+        row.setObjectName("AlertRow")  # con selector: el estilo no se hereda a las etiquetas internas
+        row.setStyleSheet(f"#AlertRow {{ background: {COLORS['card']}; border:1px solid {COLORS['border']};"
+                          " border-radius:9px; }")
         rl = QVBoxLayout(row)
         rl.setContentsMargins(10, 8, 10, 8)
         rl.setSpacing(3)
@@ -405,7 +459,7 @@ class AlertCenter(QFrame):
             top.addWidget(go)
         rl.addLayout(top)
         text = QLabel(entry.get("text", ""))
-        text.setStyleSheet("color:#D4D4D8; font-size:12px;")
+        text.setStyleSheet(f"color:{COLORS['text']}; font-size:10pt;")
         text.setWordWrap(True)
         rl.addWidget(text)
         return row
