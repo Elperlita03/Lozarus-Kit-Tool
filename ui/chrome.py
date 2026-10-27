@@ -19,8 +19,8 @@ from PySide6.QtWidgets import (QFrame, QHBoxLayout, QLabel, QMainWindow, QPlainT
                                QPushButton, QScrollArea, QVBoxLayout, QWidget)
 
 from ui._compat import HAS_QTA, qta
-from ui.theme import COLORS, LOGO_PATH
-from ui.widgets import icon, with_icon
+from ui.theme import COLORS, GLASS, LOGO_PATH
+from ui.widgets import apply_aura, icon, with_icon
 
 
 def _logo_pixmap(height: int) -> Optional[QPixmap]:
@@ -282,8 +282,9 @@ class Toast(QFrame):
         self.entry = entry
         self.setObjectName("Toast")
         color = self.KIND_COLOR.get(entry.get("kind"), COLORS["accent"])
-        self.setStyleSheet(f"#Toast {{ background: rgba(16, 14, 30, 0.96); border:1px solid {COLORS['border_hi']};"
+        self.setStyleSheet(f"#Toast {{ background: rgba(5, 5, 5, 0.96); border:1px solid {GLASS['border']};"
                            f" border-left:3px solid {color}; border-radius:12px; }}")
+        apply_aura(self)  # flota sobre el contenido: el resplandor la separa del fondo negro
         self.setFixedWidth(348)
         lay = QVBoxLayout(self)
         lay.setContentsMargins(14, 12, 12, 12)
@@ -385,8 +386,9 @@ class AlertCenter(QFrame):
         super().__init__(win)
         self.win = win
         self.setObjectName("AlertCenter")
-        self.setStyleSheet(f"#AlertCenter {{ background: rgba(14, 12, 26, 0.97); border:1px solid {COLORS['border_hi']};"
+        self.setStyleSheet(f"#AlertCenter {{ background: rgba(5, 5, 5, 0.97); border:1px solid {GLASS['border']};"
                            " border-radius:14px; }")
+        apply_aura(self)  # panel flotante bajo demanda: solo se repinta al abrirlo o desplazarlo
         self.setFixedWidth(410)
         lay = QVBoxLayout(self)
         lay.setContentsMargins(14, 12, 14, 12)
@@ -446,7 +448,7 @@ class AlertCenter(QFrame):
         color = Toast.KIND_COLOR.get(entry.get("kind"), COLORS["accent"])
         row = QFrame()
         row.setObjectName("AlertRow")  # con selector: el estilo no se hereda a las etiquetas internas
-        row.setStyleSheet(f"#AlertRow {{ background: {COLORS['card']}; border:1px solid {COLORS['border']};"
+        row.setStyleSheet(f"#AlertRow {{ background: {COLORS['card']}; border:1px solid {GLASS['border']};"
                           " border-radius:9px; }")
         rl = QVBoxLayout(row)
         rl.setContentsMargins(10, 8, 10, 8)

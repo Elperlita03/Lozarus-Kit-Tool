@@ -10,13 +10,16 @@ from __future__ import annotations
 import socket
 from collections import deque
 from contextlib import contextmanager
+from functools import lru_cache
 from typing import Any, Callable, Iterator, Optional, Sequence, Tuple
 
-from PySide6.QtCore import (Property, QEasingCurve, QPointF, QPropertyAnimation, QRectF, QSize,
-                            QThread, Qt, Signal)
-from PySide6.QtGui import QColor, QFont, QIcon, QPainter, QPen, QPolygonF
-from PySide6.QtWidgets import (QAbstractItemView, QFrame, QHBoxLayout, QLabel, QPushButton,
-                               QScrollArea, QTableWidget, QVBoxLayout, QWidget)
+from PySide6.QtCore import (Property, QEasingCurve, QEvent, QPointF, QPropertyAnimation, QRect, QRectF,
+                            QSize, QThread, QTimer, Qt, Signal)
+from PySide6.QtGui import (QBrush, QColor, QFont, QIcon, QImage, QPainter, QPainterPath, QPen, QPixmap,
+                           QPolygonF)
+from PySide6.QtWidgets import (QAbstractItemView, QFrame, QGraphicsDropShadowEffect, QGraphicsScene,
+                               QHBoxLayout, QLabel, QPushButton, QScrollArea, QTableWidget, QVBoxLayout,
+                               QWidget)
 
 from ui._compat import HAS_QTA, Event, ObservationQuality, qta
 from ui.theme import COLORS, GLASS
@@ -46,6 +49,132 @@ def with_icon(button, name: str, color: Optional[str] = None, size: int = 16):
     return button
 
 
+# ---------------------------------------------------------------------------
+# «AURA REAL»: resplandor blanco uniforme (QGraphicsDropShadowEffect con desplazamiento 0)
+# ---------------------------------------------------------------------------
+# No es una animación, pero un QGraphicsDropShadowEffect aplicado EN VIVO re-desenfoca el widget
+# en cada repintado suyo o de un hijo (medido: ×10 el coste de cada actualización y ×3 el de cada
+# paso de scroll). Por eso:
+#   · Tarjetas (#Card, #Bento, #Chip): el efecto genera UNA vez un sprite del halo y AuraHost (el
+#     cuerpo de cada página) lo pinta en 9 piezas alrededor de ellas: actualizar o desplazar el
+#     contenido solo copia píxeles.
+#   · Botones de acción y paneles flotantes (Toast, alertas): efecto en vivo; son pequeños.
+AURA_BLUR = 25
+AURA_ALPHA = 0.15                                   # blanco al 15 %
+AURA_PAD = 2 * AURA_BLUR                            # hasta dónde llega el halo fuera del widget
+AURA_RADIUS = {"Card": 14, "Bento": 14, "Chip": 12}  # tarjetas con aura -> radio de esquina (QSS)
+AURA_BUTTONS = {"", "Primary", "Danger", "Warn"}    # botones de acción (no los de utilidad)
+
+
+def _aura_effect(parent=None) -> QGraphicsDropShadowEffect:
+    effect = QGraphicsDropShadowEffect(parent)
+    effect.setBlurRadius(AURA_BLUR)
+    effect.setColor(QColor(255, 255, 255, round(255 * AURA_ALPHA)))
+    effect.setOffset(0, 0)
+    return effect
+
+
+def apply_aura(widget: QWidget) -> QGraphicsDropShadowEffect:
+    """Aura EN VIVO (botones, paneles flotantes): resplandor blanco uniforme hacia fuera."""
+    effect = _aura_effect(widget)
+    widget.setGraphicsEffect(effect)
+    return effect
+
+
+def apply_button_auras(root: QWidget) -> None:
+    """Pone el aura a los botones de acción que cuelgan de `root` (una vez por botón)."""
+    for button in root.findChildren(QPushButton):
+        if button.objectName() in AURA_BUTTONS and button.graphicsEffect() is None:
+            apply_aura(button)
+
+
+@lru_cache(maxsize=4)
+def _aura_sprite(radius: int) -> QPixmap:
+    """
+    Halo de una tarjeta de esquina `radius`, generado UNA vez con QGraphicsDropShadowEffect sobre un
+    rectángulo redondeado blanco; el interior se vacía para que solo quede el resplandor exterior.
+    """
+    core = 2 * (radius + 2) + 2                     # 2 px centrales: la parte que se estira
+    size = core + 2 * AURA_PAD
+    shape = QPainterPath()
+    shape.addRoundedRect(QRectF(AURA_PAD, AURA_PAD, core, core), radius, radius)
+    scene = QGraphicsScene(0, 0, size, size)
+    item = scene.addPath(shape, QPen(Qt.PenStyle.NoPen), QBrush(QColor("#FFFFFF")))
+    item.setGraphicsEffect(_aura_effect())
+    img = QImage(size, size, QImage.Format.Format_ARGB32_Premultiplied)
+    img.fill(Qt.GlobalColor.transparent)
+    p = QPainter(img)
+    p.setRenderHint(QPainter.RenderHint.Antialiasing)
+    scene.render(p, QRectF(0, 0, size, size), QRectF(0, 0, size, size))
+    p.setCompositionMode(QPainter.CompositionMode.CompositionMode_Clear)
+    p.fillPath(shape, QColor(0, 0, 0))
+    p.end()
+    return QPixmap.fromImage(img)
+
+
+def _paint_aura(p: QPainter, rect: QRect, radius: int, clip: QRect) -> None:
+    """Pinta el halo alrededor de `rect` en 9 piezas (esquinas fijas, bordes estirados). Solo dibuja
+    las piezas que tocan `clip`: al actualizarse un medidor no se recompone el halo entero."""
+    sprite = _aura_sprite(radius)
+    s, c = sprite.width(), AURA_PAD + radius + 2    # c: lado de cada esquina del sprite
+    out = rect.adjusted(-AURA_PAD, -AURA_PAD, AURA_PAD, AURA_PAD)
+    x, y, w, h = out.x(), out.y(), out.width(), out.height()
+    if w < 2 * c or h < 2 * c:
+        return
+    for dst, src in (((x, y, c, c), (0, 0, c, c)), ((x + w - c, y, c, c), (s - c, 0, c, c)),
+                     ((x, y + h - c, c, c), (0, s - c, c, c)), ((x + w - c, y + h - c, c, c), (s - c, s - c, c, c)),
+                     ((x + c, y, w - 2 * c, c), (c, 0, 2, c)), ((x + c, y + h - c, w - 2 * c, c), (c, s - c, 2, c)),
+                     ((x, y + c, c, h - 2 * c), (0, c, c, 2)), ((x + w - c, y + c, c, h - 2 * c), (s - c, c, c, 2))):
+        target = QRect(*dst)
+        if target.intersects(clip):
+            p.drawPixmap(target, sprite, QRect(*src))
+
+
+class AuraHost(QWidget):
+    """
+    Cuerpo de una página: pinta el aura de sus tarjetas DIRECTAS desde el sprite en caché. Si una
+    tarjeta se mueve, cambia de tamaño o se oculta, repinta el cuerpo (el halo sobresale del widget).
+    """
+
+    def childEvent(self, event) -> None:
+        super().childEvent(event)
+        child = event.child()
+        if event.added() and isinstance(child, QWidget) and child.objectName() in AURA_RADIUS:
+            child.installEventFilter(self)
+
+    def eventFilter(self, obj, event) -> bool:
+        if event.type() in (QEvent.Type.Move, QEvent.Type.Resize, QEvent.Type.Show, QEvent.Type.Hide):
+            self.update()
+        return False
+
+    def paintEvent(self, event) -> None:
+        clip = event.rect()
+        p = QPainter(self)
+        for child in self.children():
+            radius = AURA_RADIUS.get(child.objectName()) if isinstance(child, QWidget) else None
+            if radius and child.isVisible():
+                rect = child.geometry()
+                if rect.adjusted(-AURA_PAD, -AURA_PAD, AURA_PAD, AURA_PAD).intersects(clip):
+                    _paint_aura(p, rect, radius, clip)
+        p.end()
+
+
+def _hold_aura(widget: QWidget, hold: bool) -> None:
+    """
+    Apaga (hold=True) o devuelve el aura del widget y de sus contenedores. El spinner de set_busy
+    repinta el botón cada 30 ms; con el aura activa, Qt re-desenfocaría la tarjeta entera 33 veces
+    por segundo. Lleva la cuenta por efecto: dos botones ocupados en la misma tarjeta no se pisan.
+    """
+    w = widget
+    while w is not None:
+        effect = w.graphicsEffect()
+        if isinstance(effect, QGraphicsDropShadowEffect):
+            holds = max(0, int(effect.property("lz_holds") or 0) + (1 if hold else -1))
+            effect.setProperty("lz_holds", holds)
+            effect.setEnabled(holds == 0)
+        w = w.parentWidget()
+
+
 def set_busy(button: QPushButton, busy: bool, text: Optional[str] = None) -> None:
     """
     Estado «ocupado» de un botón mientras su tarea corre en segundo plano: lo deshabilita (evita el
@@ -56,6 +185,9 @@ def set_busy(button: QPushButton, busy: bool, text: Optional[str] = None) -> Non
     button.setProperty("busy", busy)  # estilo propio en el QSS (texto en acento mientras trabaja)
     button.style().unpolish(button)
     button.style().polish(button)
+    if bool(button.property("lz_aura_held")) != busy:  # el aura se pausa mientras gira el spinner
+        button.setProperty("lz_aura_held", busy)
+        _hold_aura(button, busy)
     if busy:
         if getattr(button, "_lz_idle", None) is None:   # guarda el estado de reposo una sola vez
             button._lz_idle = (button.text(), button.icon())
@@ -213,9 +345,10 @@ class Page(QWidget):
         super().__init__()
         self.setObjectName("Content")
         outer = QVBoxLayout(self)
-        outer.setContentsMargins(30, 26, 30, 16)
+        outer.setContentsMargins(18, 26, 18, 16)  # + 12 px del cuerpo: hueco para el aura de las tarjetas
         outer.setSpacing(16)
         header = QHBoxLayout()
+        header.setContentsMargins(12, 0, 12, 0)
         header.setSpacing(14)
         if icon_name:
             ic = QLabel()
@@ -238,13 +371,16 @@ class Page(QWidget):
         scroll.setObjectName("Content")
         scroll.setWidgetResizable(True)
         scroll.setFrameShape(QFrame.Shape.NoFrame)
-        body = QWidget()
+        body = AuraHost()  # pinta el aura de las tarjetas de la página
         body.setObjectName("Content")
         self.root = QVBoxLayout(body)
-        self.root.setContentsMargins(0, 0, 4, 0)
+        self.root.setContentsMargins(12, 8, 16, 14)
         self.root.setSpacing(16)
         scroll.setWidget(body)
         outer.addWidget(scroll, 1)
+        # Las páginas montan sus botones DESPUÉS de este __init__: su aura se aplica al volver al
+        # bucle de eventos, cuando ya existen todos.
+        QTimer.singleShot(0, self, lambda: apply_button_auras(self))
 
 
 class Gauge(QWidget):
@@ -325,7 +461,7 @@ class BentoCard(QFrame):
         lay.addWidget(self.status)
         self._last: Optional[Tuple[bool, str]] = None
         self._apply()
-        self.refresh()
+        self.refresh()  # aura: la pinta AuraHost alrededor de #Bento (sprite en caché, sin re-desenfocar)
 
     def refresh(self) -> None:
         state = self._status_fn()

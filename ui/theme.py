@@ -18,19 +18,20 @@ from modulos._base import CRITICAL, INFO, PASS, SKIP, WARNING
 
 APP_NAME = "LOZARUS KIT TOOL"
 
-SEVERITY_COLORS = {CRITICAL: "#F87171", WARNING: "#F5B544", PASS: "#34D399", INFO: "#7DD3FC", SKIP: "#8A87A3"}
+SEVERITY_COLORS = {CRITICAL: "#F87171", WARNING: "#F5B544", PASS: "#4ADE80", INFO: "#E5E5E5", SKIP: "#8A8A8A"}
 
 SEVERITY_ORDER = (CRITICAL, WARNING, PASS, INFO, SKIP)
 
-# Paleta «Deep Space»: negro profundo con un velo violeta casi imperceptible, bordes lavanda
-# apagados y colores semánticos suaves (no chillones). Solo HEX: el código los usa con QColor.
+# Paleta «Black & White Aura»: negro absoluto / gris vacío de fondo, blanco puro en texto y acentos.
+# Sin azules ni violetas; rojo, ámbar y verde quedan SOLO para estados de seguridad (con texto).
+# Solo HEX: el código los usa con QColor (border/border_hi = blanco al 20 % / 36 % sobre negro).
 COLORS = {
-    "bg": "#05050A", "bg_glow": "#0F0C1B", "sidebar": "#0A0914", "panel": "#0B0A14", "panel2": "#0B0A14",
-    "panel_alt": "#1D1A2E", "card": "#12101F", "border": "#2A2640", "border_hi": "#3B3560",
-    "text": "#EEECF8", "text2": "#A9A5C4", "muted": "#7A7699", "faint": "#4F4B6D", "disabled": "#3A3654",
-    "accent": "#60A5FA", "accent_hover": "#93C5FD", "accent_2": "#A78BFA", "accent_soft": "#1A1D38",
-    "beacon": "#F87171", "terminal": "#34D399",
-    "ok": "#34D399", "warn": "#F5B544", "danger": "#F87171", "info": "#7DD3FC",
+    "bg": "#000000", "bg_glow": "#050505", "sidebar": "#000000", "panel": "#050505", "panel2": "#050505",
+    "panel_alt": "#141414", "card": "#0A0A0A", "border": "#333333", "border_hi": "#5C5C5C",
+    "text": "#FFFFFF", "text2": "#BDBDBD", "muted": "#8A8A8A", "faint": "#555555", "disabled": "#3A3A3A",
+    "accent": "#FFFFFF", "accent_hover": "#D4D4D4", "accent_2": "#A3A3A3", "accent_soft": "#1A1A1A",
+    "beacon": "#F87171", "terminal": "#4ADE80",
+    "ok": "#4ADE80", "warn": "#F5B544", "danger": "#F87171", "info": "#E5E5E5",
 }
 
 # Tipografía corporativa: pila sans-serif del sistema (Windows → Linux/Android → macOS) a 10 pt y
@@ -59,35 +60,41 @@ MONO_CSS = _css_families(MONO_FAMILIES) + ", monospace"  # para font-family en e
 
 # Superficies de «cristal» (rgba, para QSS y estilos en línea; no valen para QColor).
 GLASS = {
-    "card": "rgba(20, 17, 36, 0.62)",           # tarjetas translúcidas sobre el degradado de fondo
-    "card_hi": "rgba(30, 26, 54, 0.74)",
-    "inset": "rgba(8, 7, 16, 0.55)",            # baldosas hundidas dentro de una tarjeta
-    "selected": "rgba(124, 140, 255, 0.14)",    # elemento seleccionado
+    "card": "rgba(255, 255, 255, 0.03)",        # tarjetas: un velo blanco casi invisible sobre negro
+    "card_hi": "rgba(255, 255, 255, 0.06)",
+    "inset": "rgba(0, 0, 0, 0.6)",              # baldosas hundidas dentro de una tarjeta
+    "selected": "rgba(255, 255, 255, 0.10)",    # elemento seleccionado
+    "border": "rgba(255, 255, 255, 0.2)",       # borde fino sobre el que destaca el aura
+    "border_hi": "rgba(255, 255, 255, 0.36)",
 }
 
 # Tokens SOLO para el QSS (admiten rgba() y degradados). Todo el «cristal» es QSS estático:
 # QLinearGradient + transparencias, sin temporizadores ni animaciones (coste de CPU nulo en reposo).
 _QSS_TOKENS = {
     **COLORS,
+    "border": GLASS["border"],                  # en el QSS, bordes blancos translúcidos de verdad
+    "border_hi": GLASS["border_hi"],
+    "line": "rgba(255, 255, 255, 0.45)",        # contorno de los botones
     "glass": GLASS["card"],
     "glass_hi": GLASS["card_hi"],
     "inset": GLASS["inset"],
-    "field": "rgba(5, 5, 10, 0.55)",            # campos de texto y consola
-    "tint": "rgba(124, 140, 255, 0.10)",        # hover suave del acento
-    "tint_hi": "rgba(124, 140, 255, 0.18)",     # selección / pulsado
-    "grad_root": "qlineargradient(x1:0, y1:0, x2:1, y2:1, stop:0 #05050A, stop:0.6 #07060E, stop:1 #0F0C1B)",
-    "grad_head": "qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 #0F0C1B, stop:0.5 #07060D, stop:1 #0D0B19)",
-    "grad_side": "qlineargradient(x1:0, y1:0, x2:0, y2:1, stop:0 #0D0B19, stop:1 #05050A)",
-    "grad_dialog": "qlineargradient(x1:0, y1:0, x2:1, y2:1, stop:0 #110E20, stop:1 #07060D)",
-    "grad_accent": "qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 #60A5FA, stop:1 #A78BFA)",
-    "grad_primary": "qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 rgba(96, 165, 250, 0.16), "
-                    "stop:1 rgba(167, 139, 250, 0.16))",
-    "grad_primary_hi": "qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 rgba(96, 165, 250, 0.28), "
-                       "stop:1 rgba(167, 139, 250, 0.28))",
+    "field": "rgba(255, 255, 255, 0.02)",       # campos de texto y consola
+    "tint": "rgba(255, 255, 255, 0.08)",        # hover
+    "tint_hi": "rgba(255, 255, 255, 0.14)",     # selección / pulsado
+    "select": "rgba(255, 255, 255, 0.85)",      # selección de texto (con texto negro encima)
+    "grad_root": "qlineargradient(x1:0, y1:0, x2:1, y2:1, stop:0 #000000, stop:1 #050505)",
+    "grad_head": "qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 #050505, stop:0.5 #000000, stop:1 #050505)",
+    "grad_side": "qlineargradient(x1:0, y1:0, x2:0, y2:1, stop:0 #050505, stop:1 #000000)",
+    "grad_dialog": "qlineargradient(x1:0, y1:0, x2:1, y2:1, stop:0 #0A0A0A, stop:1 #000000)",
+    "grad_accent": "qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 #FFFFFF, stop:1 #A3A3A3)",
+    "grad_primary": "qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 rgba(255, 255, 255, 0.12), "
+                    "stop:1 rgba(255, 255, 255, 0.05))",
+    "grad_primary_hi": "qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 rgba(255, 255, 255, 0.22), "
+                       "stop:1 rgba(255, 255, 255, 0.10))",
     "mono": MONO_CSS,
 }
 
-# Hoja de estilo (QSS) «Dark Cosmos Glass». Plantilla con ${token} (string.Template): los valores
+# Hoja de estilo (QSS) «Black & White Aura». Plantilla con ${token} (string.Template): los valores
 # salen de COLORS / _QSS_TOKENS, así que cambiar el tema es cambiar la paleta, no 150 líneas.
 QSS = Template("""
 #Root { background: ${grad_root}; border: 1px solid ${border}; }
@@ -121,30 +128,30 @@ QCheckBox#Switch::indicator:disabled { image: url("__SWITCH_DISABLED__"); }
 #Value { color: ${text}; font-size: 12pt; font-weight: 700; }
 
 /* Botones: contorno + tinte translúcido. Hover y pulsado suben el tinte un escalón (sin destellos). */
-QPushButton { background: transparent; color: ${accent}; border: 1px solid rgba(96, 165, 250, 0.45);
+QPushButton { background: transparent; color: ${accent}; border: 1px solid ${line};
     border-radius: 9px; padding: 9px 16px; font-weight: 600; font-size: 10pt; }
 QPushButton:hover { background: ${tint}; border-color: ${accent}; color: ${accent_hover}; }
 QPushButton:disabled { color: ${disabled}; border-color: ${border}; background: transparent; }
-QPushButton#Primary { background: ${grad_primary}; color: #DCE6FF; border: 1px solid rgba(124, 140, 255, 0.55); }
-QPushButton#Primary:hover { background: ${grad_primary_hi}; border-color: #93A5FF; color: #FFFFFF; }
+QPushButton#Primary { background: ${grad_primary}; color: #FFFFFF; border: 1px solid rgba(255, 255, 255, 0.7); }
+QPushButton#Primary:hover { background: ${grad_primary_hi}; border-color: #FFFFFF; color: #FFFFFF; }
 QPushButton#Primary:disabled { background: transparent; color: ${disabled}; border-color: ${border}; }
 QPushButton#Ghost { color: ${text2}; border-color: ${border}; }
 QPushButton#Ghost:hover { background: rgba(255, 255, 255, 0.04); color: ${text}; border-color: ${border_hi}; }
 QPushButton#Danger { color: ${danger}; border-color: rgba(248, 113, 113, 0.45); }
 QPushButton#Danger:hover { background: rgba(248, 113, 113, 0.12); border-color: ${danger}; color: #FCA5A5; }
-QPushButton#Danger:disabled { color: #5B2A36; border-color: #2E1A26; background: transparent; }
+QPushButton#Danger:disabled { color: #5A2A2A; border-color: #2E1A1A; background: transparent; }
 /* Botones de advertencia del menú: rojo suave sobre cristal (hold-to-execute) */
 QPushButton#Warn { background-color: rgba(248, 113, 113, 0.06); color: ${danger};
     border: 1px solid rgba(248, 113, 113, 0.45); border-radius: 9px; padding: 10px 14px; font-weight: 700;
     font-size: 10pt; letter-spacing: 0.5px; }
 QPushButton#Warn:hover { background-color: rgba(248, 113, 113, 0.14); border-color: ${danger}; color: #FCA5A5; }
-QPushButton#Warn:disabled { color: #5B2A36; border-color: #2E1A26; }
+QPushButton#Warn:disabled { color: #5A2A2A; border-color: #2E1A1A; }
 QPushButton#Mini { color: ${text2}; border-color: ${border}; padding: 8px 10px; font-size: 9pt; }
 QPushButton#Mini:hover { background: rgba(255, 255, 255, 0.04); color: ${text}; border-color: ${border_hi}; }
 QPushButton#Toggle { background: ${glass}; color: ${text2}; border: 1px solid ${border}; border-radius: 9px;
     padding: 8px; font-size: 10pt; font-weight: 600; text-align: left; }
 QPushButton#Toggle:hover { border-color: ${border_hi}; color: ${text}; }
-QPushButton#Toggle:checked { background: ${grad_primary}; color: ${text}; border-color: rgba(124, 140, 255, 0.6); }
+QPushButton#Toggle:checked { background: ${grad_primary}; color: ${text}; border-color: rgba(255, 255, 255, 0.7); }
 /* Pulsado: respuesta táctil inmediata. Va DESPUÉS de los :hover (misma especificidad → gana). */
 QPushButton:pressed, QPushButton#Primary:pressed { background: ${tint_hi}; border-color: ${accent}; color: #FFFFFF; }
 QPushButton#Ghost:pressed, QPushButton#Mini:pressed { background: rgba(255, 255, 255, 0.08);
@@ -154,14 +161,14 @@ QPushButton#Toggle:pressed { background: ${glass_hi}; }
 /* Deshabilitado: un selector con ID (#Ghost…) pesa más que QPushButton:disabled, así que cada
    variante necesita su propia regla o el botón PARECERÍA activo estando deshabilitado. */
 QPushButton#Ghost:disabled, QPushButton#Mini:disabled { color: ${disabled}; border-color: ${border}; background: transparent; }
-QPushButton#Toggle:disabled { color: ${disabled}; border-color: ${border}; background: rgba(10, 9, 20, 0.5); }
+QPushButton#Toggle:disabled { color: ${disabled}; border-color: ${border}; background: ${field}; }
 QPushButton:focus { outline: none; }
 /* Ocupado (set_busy): deshabilitado pero con texto en acento = «trabajando», no «no disponible».
    Una regla por variante: el ID de cada tipo pesa más que la propiedad sola. */
 QPushButton[busy="true"]:disabled, QPushButton#Primary[busy="true"]:disabled,
 QPushButton#Ghost[busy="true"]:disabled, QPushButton#Mini[busy="true"]:disabled,
 QPushButton#Danger[busy="true"]:disabled, QPushButton#Toggle[busy="true"]:disabled {
-    color: ${accent_hover}; border-color: rgba(96, 165, 250, 0.35); background: ${tint}; }
+    color: ${accent_hover}; border-color: ${border_hi}; background: ${tint}; }
 /* Indicador global de actividad (junto a la consola): no es clicable ni cambia al pasar el ratón. */
 QPushButton#Activity, QPushButton#Activity:hover, QPushButton#Activity:pressed { background: transparent;
     border: none; color: ${accent}; padding: 0 2px; font-size: 9pt; font-weight: 600; text-align: right; }
@@ -172,7 +179,7 @@ QPushButton#Activity, QPushButton#Activity:hover, QPushButton#Activity:pressed {
 #DialogHint { color: ${danger}; font-size: 9pt; font-weight: 700; }
 QLineEdit { background-color: ${field}; border: 1px solid ${border}; border-radius: 9px;
     padding: 8px 10px; color: ${text}; font-family: ${mono}; font-size: 10pt;
-    selection-background-color: rgba(96, 165, 250, 0.35); }
+    selection-background-color: ${select}; selection-color: #000000; }
 QLineEdit:hover { border-color: ${border_hi}; }
 QLineEdit:focus { border-color: ${accent}; }
 QLineEdit:disabled { color: ${disabled}; }
@@ -197,7 +204,7 @@ QMenu::item:disabled { color: ${faint}; }
 QMenu::separator { height: 1px; background: ${border}; margin: 4px 6px; }
 QPlainTextEdit { font-family: ${mono}; }
 #Console { background-color: ${field}; border: 1px solid ${border}; border-radius: 10px; color: ${text};
-    padding: 4px; selection-background-color: rgba(96, 165, 250, 0.35); selection-color: #FFFFFF; }
+    padding: 4px; selection-background-color: ${select}; selection-color: #000000; }
 #ConsoleTitle { color: ${text2}; font-size: 8pt; font-weight: 700; letter-spacing: 1.2px; }
 #StatusOk { color: ${ok}; font-weight: 700; }
 #StatusWarn { color: ${warn}; font-weight: 700; }
@@ -218,7 +225,7 @@ QTableWidget { background-color: transparent; alternate-background-color: rgba(2
 QTableWidget::item { padding: 0 8px; color: ${text}; border: none; }
 QTableWidget::item:selected { background-color: ${tint_hi}; color: #FFFFFF; }
 QHeaderView { background-color: transparent; border: none; }
-QHeaderView::section { background-color: rgba(15, 12, 27, 0.88); color: ${text2}; border: none;
+QHeaderView::section { background-color: rgba(255, 255, 255, 0.04); color: ${text2}; border: none;
     border-bottom: 1px solid ${border}; padding: 8px 8px; font-size: 9pt; font-weight: 700; letter-spacing: 0.8px;
     font-variant: small-caps; }
 QHeaderView::section:hover { color: ${text}; }
@@ -248,7 +255,7 @@ QLabel#Tiny { color: ${text2}; font-size: 9pt; }
 QPushButton#Chiplet { background: transparent; color: ${muted}; border: 1px solid ${border}; border-radius: 10px;
     padding: 3px 11px; font-size: 8pt; font-weight: 700; letter-spacing: 0.6px; }
 QPushButton#Chiplet:hover { color: ${text}; border-color: ${border_hi}; }
-QPushButton#Chiplet:checked { background: ${tint_hi}; color: #FFFFFF; border-color: rgba(124, 140, 255, 0.6); }
+QPushButton#Chiplet:checked { background: ${tint_hi}; color: #FFFFFF; border-color: rgba(255, 255, 255, 0.7); }
 QPushButton#ToastClose { background: transparent; border: none; color: ${muted}; font-size: 13px; }
 QPushButton#ToastClose:hover { color: ${text}; }
 #ConsoleWrap { background: transparent; }
@@ -301,7 +308,7 @@ for _token, _name, _svg in (
         ("__SWITCH_OFF__", "switch-off.svg", _switch_svg(False, COLORS["card"], COLORS["border_hi"], COLORS["muted"])),
         ("__SWITCH_OFF_HOVER__", "switch-off-hover.svg",
          _switch_svg(False, COLORS["card"], COLORS["accent"], COLORS["text2"])),
-        ("__SWITCH_ON__", "switch-on.svg", _switch_svg(True, "", COLORS["accent_hover"], "#FFFFFF")),
+        ("__SWITCH_ON__", "switch-on.svg", _switch_svg(True, "", COLORS["accent"], COLORS["bg"])),
         ("__SWITCH_DISABLED__", "switch-disabled.svg",
          _switch_svg(False, COLORS["panel"], COLORS["border"], COLORS["disabled"]))):
     QSS = QSS.replace(_token, _ui_asset(_name, _svg))
