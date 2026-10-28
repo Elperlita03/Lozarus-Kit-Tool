@@ -175,6 +175,46 @@ def audit_ports(backend) -> list:
     return rows
 
 
+# --- Utilidades rápidas (uso técnico en equipos ajenos / modo pendrive) --------------------------
+REQUIREMENTS_PATH = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "requirements.txt")
+NETWORK_RESCUE_STEPS = (
+    ("Caché DNS vaciada", ["ipconfig", "/flushdns"]),
+    ("Caché ARP vaciada", ["arp", "-d", "*"]),
+    ("Winsock restablecido (efectivo tras reiniciar)", ["netsh", "winsock", "reset"]),
+)
+
+
+def install_requirements(path: str = REQUIREMENTS_PATH) -> dict:
+    """`python -m pip install -r requirements.txt` sin shell. Devuelve {ok, summary}. No lanza."""
+    if getattr(sys, "frozen", False):
+        return {"ok": False, "summary": "Ejecutable empaquetado: las dependencias ya van incluidas."}
+    if not os.path.isfile(path):
+        return {"ok": False, "summary": f"No se encontró {os.path.basename(path)}."}
+    try:
+        code, out, err = run_cmd([sys.executable, "-m", "pip", "install", "--disable-pip-version-check",
+                                  "-r", path], timeout=600)
+    except Exception as exc:  # noqa: BLE001  (pip ausente, sin red, tiempo agotado…)
+        return {"ok": False, "summary": f"{type(exc).__name__}: {exc}"}
+    lines = [ln.strip() for ln in (out + "\n" + err).splitlines() if ln.strip()]
+    installed = next((ln for ln in lines if ln.startswith("Successfully installed")), "")
+    if code == 0:
+        return {"ok": True, "summary": installed or "Todas las dependencias ya estaban instaladas."}
+    return {"ok": False, "summary": (lines[-1] if lines else f"pip terminó con código {code}")[:300]}
+
+
+def network_rescue() -> list:
+    """Ejecuta los pasos de rescate de red uno a uno (un fallo no detiene los demás). [(etiqueta, ok, msg)]."""
+    results = []
+    for label, cmd in NETWORK_RESCUE_STEPS:
+        try:
+            code, out, err = run_cmd(cmd, timeout=60)
+            msg = (err or out).strip().splitlines()[-1:] if code else []
+            results.append((label, code == 0, msg[0] if msg else ""))
+        except Exception as exc:  # noqa: BLE001
+            results.append((label, False, f"{type(exc).__name__}: {exc}"))
+    return results
+
+
 class AuditWorker(QThread):
     """
     Ejecuta los plugins de auditoría (solo lectura) en segundo plano y publica el progreso y cada
@@ -283,6 +323,29 @@ class AuditPage(Page):
         self.progress.setRange(0, 100)
         self.progress.setValue(0)
         lay.addWidget(self.progress)
+        tools = QHBoxLayout()
+        tools.setSpacing(8)
+        tcap = QLabel("UTILIDADES")
+        tcap.setObjectName("ChipCap")
+        self.deps_btn = QPushButton("Verificar / Instalar Dependencias")
+        self.deps_btn.setObjectName("Mini")
+        self.deps_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        with_icon(self.deps_btn, "fa5s.box-open", COLORS["muted"], 13)
+        self.deps_btn.setToolTip("Ejecuta «pip install -r requirements.txt» con este mismo Python (necesita internet).")
+        self.deps_btn.clicked.connect(self.install_dependencies)
+        self.netfix_btn = QPushButton("Rescate de Red (Flush DNS / Winsock)")
+        self.netfix_btn.setObjectName("Mini")
+        self.netfix_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        with_icon(self.netfix_btn, "fa5s.first-aid", COLORS["muted"], 13)
+        self.netfix_btn.setToolTip("ipconfig /flushdns · arp -d * · netsh winsock reset (requiere Administrador).")
+        self.netfix_btn.clicked.connect(self.rescue_network)
+        if not IS_WINDOWS:
+            self.netfix_btn.setEnabled(False)
+            self.netfix_btn.setToolTip("Solo disponible en Windows.")
+        for w in (tcap, self.deps_btn, self.netfix_btn):
+            tools.addWidget(w)
+        tools.addStretch(1)
+        lay.addLayout(tools)
         if self._ports_backend is None:
             self.ports_btn.setEnabled(False)
             self.ports_btn.setToolTip("El plugin de puertos (modulos/04_puertos.py) no está disponible.")
@@ -905,3 +968,55 @@ class AuditPage(Page):
             self.app.relaunch_as_admin()
         else:
             self._run_fixes([(f, spec)])
+
+    # --- Utilidades rápidas --------------------------------------------------------------------
+    def install_dependencies(self) -> None:
+        if not ConfirmDialog.ask(self.app, "Verificar / Instalar Dependencias",
+                                 f"Se ejecutará con este Python:\n\n{os.path.basename(sys.executable)} -m pip install "
+                                 f"-r requirements.txt\n\nDescarga de internet los paquetes que falten "
+                                 "(PySide6, qtawesome, psutil, plyer…). ¿Continuar?",
+                                 confirm_text="Instalar"):
+            return
+        set_busy(self.deps_btn, True, "Instalando…")
+        self.app.log_tactical("Verificando dependencias (pip install -r requirements.txt)")
+
+        def done(ok, res):
+            set_busy(self.deps_btn, False)
+            if not ok or not isinstance(res, dict):
+                res = {"ok": False, "summary": str(res)}
+            kind = "*" if res["ok"] else "x"
+            self.app.console.log(kind, f"Dependencias: {res['summary']}")
+            _emit_event(self.app, source="vectores:utilidades", event_type="tools.dependencies",
+                        payload={"ok": res["ok"], "summary": res["summary"]})
+            Toast.notify(self.app, kind, "Dependencias", res["summary"], "fa5s.box-open")
+
+        self.app.run_task(lambda emit: install_requirements(), done)
+
+    def rescue_network(self) -> None:
+        if not getattr(self.app, "admin", False):
+            Toast.notify(self.app, "x", "Se requiere elevación",
+                         "El rescate de red (ARP y Winsock) necesita Administrador. Relanza Lozarus como "
+                         f"{ADMIN_NAME} y vuelve a intentarlo.", "fa5s.user-shield")
+            return
+        pasos = "\n".join(f"  · {' '.join(cmd)}" for _label, cmd in NETWORK_RESCUE_STEPS)
+        if not ConfirmDialog.ask(self.app, "Rescate de Red",
+                                 f"Se ejecutarán en este equipo:\n\n{pasos}\n\nLa conexión puede cortarse unos "
+                                 "segundos y el restablecimiento de Winsock se completa al reiniciar. ¿Continuar?",
+                                 confirm_text="Reparar red", danger=True):
+            return
+        set_busy(self.netfix_btn, True, "Reparando…")
+        self.app.log_tactical("Rescate de red: flush DNS · ARP · Winsock")
+
+        def done(ok, res):
+            set_busy(self.netfix_btn, False)
+            steps = res if ok and isinstance(res, list) else [("Rescate de red", False, str(res))]
+            good = [label for label, success, _msg in steps if success]
+            bad = [f"{label}: {msg or 'falló'}" for label, success, msg in steps if not success]
+            kind = "*" if not bad else "!" if good else "x"
+            text = (" · ".join(good) or "Ningún paso se completó.") + (f"\nSin aplicar: {' · '.join(bad)}" if bad else "")
+            self.app.console.log(kind, f"Rescate de red: {text}")
+            _emit_event(self.app, source="vectores:utilidades", event_type="tools.network_rescue",
+                        payload={"done": good, "failed": bad})
+            Toast.notify(self.app, kind, "Rescate de Red", text, "fa5s.first-aid")
+
+        self.app.run_task(lambda emit: network_rescue(), done)
