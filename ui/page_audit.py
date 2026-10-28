@@ -13,13 +13,16 @@ import os
 import sys
 from typing import TYPE_CHECKING, Optional, Tuple
 
+import subprocess
+
 import psutil
 from PySide6.QtCore import QThread, Qt, Signal
 from PySide6.QtGui import QColor
 from PySide6.QtWidgets import (QButtonGroup, QFrame, QHBoxLayout, QLabel, QPlainTextEdit, QProgressBar, QPushButton,
                                QTableWidgetItem, QTabWidget, QVBoxLayout, QWidget)
 
-from modulos._base import CRITICAL, INFO, IS_WINDOWS, PASS, WARNING, AuditContext, Report
+from modulos._base import ADMIN_NAME, CRITICAL, INFO, IS_WINDOWS, PASS, SKIP, WARNING, AuditContext, Report
+from modulos._inicio import RUN_KEYS
 from modulos._utilidades import run_cmd
 
 from ui.theme import COLORS, SEVERITY_COLORS, SEVERITY_ORDER, badge_qss
@@ -45,6 +48,96 @@ RISK_EXPOSED = ("Un puerto expuesto es una puerta abierta: cualquier equipo de l
                 "no necesitas amplía la superficie de ataque: ciérralo o bloquéalo en el firewall.")
 RISK_LOCAL = ("Solo escucha en loopback: otros equipos no lo alcanzan, pero un programa malicioso que ya corra "
               "en este equipo sí puede usarlo para escalar privilegios o moverse entre procesos.")
+
+# Inspector de hallazgos: qué protege cada directiva de Windows y por qué conviene endurecerla.
+DEFENSE = {
+    "pslog": "El registro de bloques de script (evento 4104) guarda el código PowerShell que se ejecuta, aunque "
+             "llegue ofuscado o solo exista en memoria. Es la principal evidencia forense frente al malware sin "
+             "fichero y a los ataques «living off the land».",
+    "run": "Las claves Run/RunOnce lanzan programas en cada inicio de sesión: es la técnica de persistencia más "
+           "usada por el malware (MITRE T1547.001). Eliminar la entrada no borra el ejecutable, y su valor queda "
+           "guardado antes en la Caja Negra para poder restaurarlo.",
+    "firewall": "El Firewall de Windows descarta las conexiones entrantes no solicitadas. Sin él, cualquier "
+                "servicio en escucha queda expuesto a gusanos, fuerza bruta y movimiento lateral desde la red.",
+    "hvci": "La Integridad de memoria (HVCI) usa el hipervisor para que en el núcleo solo se ejecute código "
+            "firmado y verificado: bloquea rootkits y drivers vulnerables o sin firma (BYOVD). Requiere reiniciar.",
+    "admin": f"Esta comprobación no pudo ejecutarse sin privilegios de {ADMIN_NAME}: un hallazgo omitido es un "
+             "punto ciego. Relanza Lozarus elevado y repite el diagnóstico.",
+}
+PS_KEY = r"SOFTWARE\Policies\Microsoft\Windows\PowerShell\ScriptBlockLogging"
+HVCI_KEY = r"SYSTEM\CurrentControlSet\Control\DeviceGuard\Scenarios\HypervisorEnforcedCodeIntegrity"
+FIREWALL_ON = ["netsh", "advfirewall", "set", "allprofiles", "state", "on"]
+
+
+def _hive(name: str):
+    import winreg  # solo Windows: se importa al aplicar la acción
+    return {"HKLM": winreg.HKEY_LOCAL_MACHINE, "HKCU": winreg.HKEY_CURRENT_USER}[name]
+
+
+def set_dword(subkey: str, name: str, value: int = 1) -> dict:
+    """Escribe un DWORD en HKLM (vista de 64 bits), creando la clave si no existe."""
+    import winreg
+    with winreg.CreateKeyEx(_hive("HKLM"), subkey, 0, winreg.KEY_SET_VALUE | winreg.KEY_WOW64_64KEY) as key:
+        winreg.SetValueEx(key, name, 0, winreg.REG_DWORD, value)
+    return {"registry": f"HKLM\\{subkey}", "value": name, "data": value}
+
+
+def read_run_value(hive: str, subkey: str, name: str) -> dict:
+    """Copia de seguridad de una entrada de arranque (se guarda en la Caja Negra antes de borrarla)."""
+    import winreg
+    with winreg.OpenKey(_hive(hive), subkey, 0, winreg.KEY_READ | winreg.KEY_WOW64_64KEY) as key:
+        data, kind = winreg.QueryValueEx(key, name)
+    return {"registry": f"{hive}\\{subkey}", "value": name, "data": str(data), "type": kind}
+
+
+def delete_run_value(hive: str, subkey: str, name: str) -> dict:
+    import winreg
+    with winreg.OpenKey(_hive(hive), subkey, 0, winreg.KEY_SET_VALUE | winreg.KEY_WOW64_64KEY) as key:
+        winreg.DeleteValue(key, name)
+    return {"registry": f"{hive}\\{subkey}", "deleted": name}
+
+
+def netsh(cmd: list) -> dict:
+    rc, out, err = run_cmd(cmd)
+    if rc != 0:
+        raise OSError((out or err).strip() or f"netsh devolvió {rc}")
+    return {"command": subprocess.list2cmdline(cmd)}
+
+
+def finding_fix(f) -> Optional[dict]:
+    """
+    Acción de endurecimiento para un hallazgo: kind, label, icon, what (lo que se aplicará, exacto),
+    admin, group (acciones idénticas se ejecutan una vez), fn (segundo plano), backup y how.
+    """
+    if f.severity is SKIP:
+        needs = ADMIN_NAME in f.detail or "denegado" in f.detail.lower()
+        return {"kind": "admin", "label": "Relanzar como Administrador", "icon": "fa5s.user-shield"} if needs else None
+    if f.severity not in (CRITICAL, WARNING):
+        return None
+    if f.check == "check_powershell_logging":
+        return {"kind": "pslog", "label": "Activar Registro PowerShell", "icon": "fa5s.terminal", "admin": True,
+                "what": f"HKLM\\{PS_KEY}\\EnableScriptBlockLogging = 1 (DWORD)", "group": "pslog",
+                "fn": lambda: set_dword(PS_KEY, "EnableScriptBlockLogging"),
+                "how": "registro de bloques de script de PowerShell activado"}
+    if f.key.startswith("persist:run:"):
+        origin, _, name = f.key[len("persist:run:"):].partition(":")
+        hive, subkey = next(((h, k) for label, h, k in RUN_KEYS if label == origin), (None, None))
+        if hive is None or not name:
+            return None
+        return {"kind": "run", "label": "Eliminar Entrada de Arranque", "icon": "fa5s.trash-alt",
+                "admin": hive == "HKLM", "what": f"{hive}\\{subkey}\\{name} (se elimina el valor)",
+                "group": f.key, "backup": lambda: read_run_value(hive, subkey, name),
+                "fn": lambda: delete_run_value(hive, subkey, name), "how": f"entrada de arranque «{name}» eliminada"}
+    if f.key.startswith("firewall:") and "desactivado" in f.title.lower():
+        return {"kind": "firewall", "label": "Activar Firewall", "icon": "fa5s.shield-alt", "admin": True,
+                "what": subprocess.list2cmdline(FIREWALL_ON), "group": "firewall",
+                "fn": lambda: netsh(FIREWALL_ON), "how": "Firewall de Windows activado en todos los perfiles"}
+    if f.key in ("hardening:hvci", "persist:drivers:unsigned"):
+        return {"kind": "hvci", "label": "Activar Integridad de Memoria (HVCI)", "icon": "fa5s.microchip",
+                "admin": True, "what": f"HKLM\\{HVCI_KEY}\\Enabled = 1 (DWORD)", "group": "hvci",
+                "fn": lambda: set_dword(HVCI_KEY, "Enabled"),
+                "how": "Integridad de memoria (HVCI) activada (efectiva tras reiniciar)"}
+    return None
 
 
 def ports_backend(modules) -> Optional[object]:
@@ -177,7 +270,9 @@ class AuditPage(Page):
             actions, "Mitigar Riesgos Detectados", "fa5s.magic", "Danger",
             "Riesgos WARNING / CRITICAL pendientes (hallazgos + puertos de riesgo)")
         self.fix_btn.setEnabled(False)
-        self.fix_btn.setToolTip("Las acciones de mitigación se activan en el siguiente paso del rediseño.")
+        self.fix_btn.clicked.connect(self.mitigate_all)
+        self._fixed = {}  # id(Finding) -> cómo se mitigó
+        self._fixing = False
         actions.addStretch(1)
         lay.addLayout(actions)
         self.status = QLabel("Listo para analizar")
@@ -252,8 +347,9 @@ class AuditPage(Page):
     def _counts(self) -> dict:
         ports = self._port_rows or []
         ports = [r for r in ports if not r.get("mitigated")]
-        crit = sum(1 for r in ports if r["severity"] is CRITICAL) + sum(1 for f in self.findings if f.severity is CRITICAL)
-        warn = sum(1 for r in ports if r["severity"] is WARNING) + sum(1 for f in self.findings if f.severity is WARNING)
+        live = [f for f in self.findings if id(f) not in self._fixed]
+        crit = sum(1 for r in ports if r["severity"] is CRITICAL) + sum(1 for f in live if f.severity is CRITICAL)
+        warn = sum(1 for r in ports if r["severity"] is WARNING) + sum(1 for f in live if f.severity is WARNING)
         return {"all": len(self._port_rows or []) + len(self.findings), "critical": crit, "warning": warn,
                 "exposed": sum(1 for r in ports if r["exposed"])}
 
@@ -271,6 +367,10 @@ class AuditPage(Page):
         known = self._port_rows is not None or self.findings or self.last_result is not None
         self._set_badge(self._fix_badge, risks if known else None,
                         COLORS["danger"] if counts["critical"] else COLORS["warn"] if risks else COLORS["faint"])
+        pending = len(self._pending_fixes())
+        self.fix_btn.setEnabled(bool(pending) and not self._fixing)
+        self.fix_btn.setToolTip(f"{pending} mitigaciones automáticas disponibles" if pending
+                                else "No hay riesgos WARNING / CRITICAL con remediación automática.")
 
     def _set_filter(self, key: str) -> None:
         self._filter = key
@@ -316,22 +416,29 @@ class AuditPage(Page):
         lay.addWidget(self._build_port_inspector())
         return host
 
-    def _build_port_inspector(self) -> QFrame:
-        """Inspector del puerto seleccionado: explicación defensiva (izq.) y acciones reales (der.)."""
-        self.inspector = QFrame()
-        self.inspector.setObjectName("Card")
-        row = QHBoxLayout(self.inspector)
+    @staticmethod
+    def _inspector(captions, left, right) -> QFrame:
+        """Tarjeta inferior de dos columnas (rim light de #Card); oculta hasta seleccionar una fila."""
+        card = QFrame()
+        card.setObjectName("Card")
+        row = QHBoxLayout(card)
         row.setContentsMargins(16, 12, 16, 12)
         row.setSpacing(18)
-        cols = []
-        for caption in ("POR QUÉ ES UN VECTOR DE RIESGO", "ACCIONES"):
+        for caption, widgets, stretch in zip(captions, (left, right), (3, 2)):
             col = QVBoxLayout()
             col.setSpacing(8)
             cap = QLabel(caption)
             cap.setObjectName("ChipCap")
             col.addWidget(cap)
-            cols.append(col)
-        cols[0].addWidget(self.port_detail, 1)
+            for widget in widgets:
+                col.addWidget(widget)
+            col.addStretch(1)
+            row.addLayout(col, stretch)
+        card.setVisible(False)
+        return card
+
+    def _build_port_inspector(self) -> QFrame:
+        """Inspector del puerto seleccionado: explicación defensiva (izq.) y acciones reales (der.)."""
         self.block_btn = QPushButton("Bloquear Puerto en Firewall")
         self.kill_btn = QPushButton("Finalizar Proceso Propietario")
         for button, icon_name, slot in ((self.block_btn, "fa5s.ban", self._block_port),
@@ -340,11 +447,8 @@ class AuditPage(Page):
             button.setCursor(Qt.CursorShape.PointingHandCursor)
             with_icon(button, icon_name, COLORS["danger"])
             button.clicked.connect(slot)
-            cols[1].addWidget(button)
-        cols[1].addStretch(1)
-        row.addLayout(cols[0], 3)
-        row.addLayout(cols[1], 2)
-        self.inspector.setVisible(False)  # solo aparece al seleccionar un puerto en escucha
+        self.inspector = self._inspector(("POR QUÉ ES UN VECTOR DE RIESGO", "ACCIONES"), [self.port_detail],
+                                         [self.block_btn, self.kill_btn])
         return self.inspector
 
     def _build_diag_tab(self) -> QWidget:
@@ -374,9 +478,17 @@ class AuditPage(Page):
         self.detail = QPlainTextEdit()
         self.detail.setObjectName("Detail")
         self.detail.setReadOnly(True)
-        self.detail.setFixedHeight(118)
-        self.detail.setPlainText("Selecciona un hallazgo de la tabla para ver su detalle y la recomendación.")
-        lay.addWidget(self.detail, 1)
+        self.detail.setFixedHeight(150)
+        self.harden_btn = QPushButton()
+        self.harden_btn.setObjectName("Danger")
+        self.harden_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.harden_btn.clicked.connect(self._harden_selected)
+        self.harden_note = QLabel()
+        self.harden_note.setObjectName("CardText")
+        self.harden_note.setWordWrap(True)
+        self.finding_inspector = self._inspector(("INTELIGENCIA DEFENSIVA", "ACCIONES DE ENDURECIMIENTO"),
+                                                 [self.detail], [self.harden_btn, self.harden_note])
+        lay.addWidget(self.finding_inspector)
         return host
 
     # --- Métricas (status_fn de las BentoCard) ----------------------------------------------------
@@ -498,52 +610,156 @@ class AuditPage(Page):
             text += f"\n\n✔ Mitigado: {row['mitigated']}."
         self.port_detail.setText(text)
         done = bool(row.get("mitigated"))
-        self.block_btn.setEnabled(not done)
+        self.block_btn.setEnabled(not done and not self._fixing)
         killable = row["pid"] is not None and not self._protected(row)
         self.kill_btn.setEnabled(killable and not done)
         self.kill_btn.setToolTip("" if killable else "Proceso protegido del sistema o PID desconocido.")
 
-    def _block_port(self) -> None:
-        """Regla de entrada REAL en el Firewall de Windows (netsh advfirewall); exige Administrador."""
-        row = self._selected_port()
-        if row is None:
-            return
-        label = f"{row['proto']} {row['port']} ({row['service']})"
-        if not IS_WINDOWS:
-            Toast.notify(self.app, "!", "Firewall", "netsh advfirewall solo existe en Windows.", "fa5s.ban")
-            return
-        if not self.app.admin:
-            if ConfirmDialog.ask(self.app, "Se requiere Administrador",
-                                 "Crear reglas en el Firewall de Windows exige privilegios de Administrador. "
-                                 "¿Relanzar Lozarus elevado (UAC)?", confirm_text="Relanzar como Administrador"):
-                self.app.relaunch_as_admin()
-            return
-        if not ConfirmDialog.ask(self.app, "Bloquear puerto", f"Se creará una regla de entrada que bloquea {label}: "
-                                 "dejará de ser accesible desde otros equipos. ¿Continuar?",
-                                 confirm_text="Bloquear puerto", danger=True):
-            return
+    @staticmethod
+    def _port_fix(row: dict) -> dict:
+        """Regla de entrada REAL en el Firewall de Windows (netsh advfirewall) para un puerto."""
         rule = f"Lozarus - Bloqueo {row['proto']} {row['port']}"
         cmd = ["netsh", "advfirewall", "firewall", "add", "rule", f"name={rule}", "dir=in", "action=block",
                f"protocol={row['proto']}", f"localport={row['port']}"]
-        self.app.log_tactical(f"Firewall: bloqueando {label}")
-        self.block_btn.setEnabled(False)
-        self.app.run_task(lambda emit: run_cmd(cmd), lambda ok, res: self._block_done(row, rule, ok, res))
+        return {"kind": "port", "label": "Bloquear Puerto en Firewall", "admin": True,
+                "what": subprocess.list2cmdline(cmd), "group": f"port:{row['proto']}:{row['port']}",
+                "fn": lambda: netsh(cmd), "how": f"bloqueado en el firewall (regla «{rule}»)"}
 
-    def _block_done(self, row: dict, rule: str, ok: bool, res) -> None:
-        applied = ok and isinstance(res, tuple) and res[0] == 0
-        detail = (res[1] or res[2]).strip() if ok and isinstance(res, tuple) else str(res)
-        text = (f"Regla «{rule}» creada." if applied
-                else f"No se pudo bloquear {row['proto']} {row['port']}: {detail}")
-        self.app.console.log("*" if applied else "x", f"Firewall: {text}")
-        _emit_event(self.app, source="vectores:puertos", event_type="firewall.block",
-                    payload={"port": row["port"], "proto": row["proto"], "rule": rule, "ok": applied,
-                             "detail": detail})
-        Toast.notify(self.app, "*" if applied else "x", "Puerto bloqueado" if applied else "Firewall", text,
-                     "fa5s.ban")
-        if applied:
-            self._mark_mitigated(row, f"bloqueado en el firewall (regla «{rule}»)")
-        elif row is self._selected_port():
-            self._show_port_detail()  # reactiva los botones
+    def _block_port(self) -> None:
+        row = self._selected_port()
+        if row is not None and not row.get("mitigated"):
+            self._run_fixes([(row, self._port_fix(row))])
+
+    def _pending_fixes(self) -> list:
+        """(objetivo, acción) pendientes: puertos de riesgo expuestos y hallazgos con endurecimiento."""
+        out = [(r, self._port_fix(r)) for r in self._port_rows or []
+               if r["exposed"] and r["severity"] in (CRITICAL, WARNING) and not r.get("mitigated")]
+        for f in self.findings:
+            spec = finding_fix(f) if id(f) not in self._fixed else None
+            if spec and spec["kind"] != "admin":
+                out.append((f, spec))
+        return out
+
+    def mitigate_all(self) -> None:
+        self._run_fixes(self._pending_fixes())
+
+    def _run_fixes(self, targets: list) -> None:
+        """Elevación, una única confirmación, copias de seguridad y ejecución en segundo plano."""
+        if not targets or self._fixing:
+            return
+        if not IS_WINDOWS:
+            Toast.notify(self.app, "!", "Mitigación", "Las acciones de endurecimiento solo existen en Windows.",
+                         "fa5s.magic")
+            return
+        if any(spec["admin"] for _, spec in targets) and not getattr(self.app, "admin", False):
+            if ConfirmDialog.ask(self.app, "Se requiere Administrador",
+                                 "Estas acciones modifican el registro HKLM o el firewall y exigen privilegios de "
+                                 "Administrador. ¿Relanzar Lozarus elevado (UAC)?",
+                                 confirm_text="Relanzar como Administrador"):
+                self.app.relaunch_as_admin()
+            return
+        jobs = {}
+        for _, spec in targets:
+            jobs.setdefault(spec["group"], spec)
+        lines = [f"• {spec['label']}: {spec['what']}" for spec in jobs.values()]
+        if len(targets) == 1:
+            title, intro = targets[0][1]["label"], "Se aplicará exactamente:"
+        else:
+            title, intro = "Mitigar Riesgos Detectados", f"Se aplicarán {len(jobs)} mitigaciones en lote " \
+                                                         f"({len(targets)} riesgos):"
+        more = f"\n… y {len(lines) - 8} más" if len(lines) > 8 else ""
+        if not ConfirmDialog.ask(self.app, title, f"{intro}\n" + "\n".join(lines[:8]) + more + "\n\n¿Continuar?",
+                                 confirm_text="Aplicar", danger=True):
+            return
+        for group, spec in list(jobs.items()):  # copia de seguridad ANTES de borrar nada
+            if "backup" not in spec:
+                continue
+            try:
+                spec["saved"] = spec["backup"]()
+            except OSError as exc:
+                spec["saved"] = {"error": str(exc)}
+            _emit_event(self.app, source="vectores:hallazgos", event_type="finding.backup",
+                        payload={"action": spec["label"], **spec["saved"]})
+            if "error" in spec["saved"]:
+                del jobs[group]  # sin copia de seguridad no se borra
+        self._fixing = True
+        self.app.log_tactical(f"Mitigación: aplicando {len(jobs)} acciones")
+        set_busy(self.fix_btn, True, "Mitigando…")
+        self._update_counters()
+        work = [(group, spec["fn"]) for group, spec in jobs.items()]
+
+        def run(emit):
+            results = {}
+            for group, fn in work:
+                try:
+                    results[group] = (True, fn())
+                except Exception as exc:  # noqa: BLE001  (cada fallo se informa por separado)
+                    results[group] = (False, f"{type(exc).__name__}: {exc}")
+            return results
+
+        self.app.run_task(run, lambda ok, res: self._fixes_done(targets, ok, res))
+
+    def _fixes_done(self, targets: list, ok: bool, results) -> None:
+        self._fixing = False
+        set_busy(self.fix_btn, False)
+        if not ok or not isinstance(results, dict):
+            Toast.notify(self.app, "x", "Mitigación", f"No se pudo completar: {results}", "fa5s.magic")
+            results = {}
+        done, failed = 0, []
+        for target, spec in targets:
+            good, info = results.get(spec["group"], (False, "sin copia de seguridad: no se aplicó"))
+            port = isinstance(target, dict)
+            payload = {"action": spec["label"], "what": spec["what"], "ok": good,
+                       "detail": info, **spec.get("saved", {})}
+            if port:
+                payload.update(port=target["port"], proto=target["proto"])
+            else:
+                payload.update(module=target.module, title=target.title, key=target.key)
+            _emit_event(self.app, source="vectores:puertos" if port else "vectores:hallazgos",
+                        event_type="firewall.block" if port else "finding.mitigated", payload=payload)
+            self.app.console.log("*" if good else "x", f"{spec['label']}: {spec['how'] if good else info}")
+            if not good:
+                failed.append(f"{spec['label']}: {info}")
+            elif port:
+                done += 1
+                self._mark_mitigated(target, spec["how"])
+            else:
+                done += 1
+                self._mark_finding(target, spec["how"])
+        if len(targets) == 1:
+            text = targets[0][1]["how"].capitalize() + "." if done else failed[0]
+        else:
+            text = f"{done} de {len(targets)} riesgos mitigados." + (f" Fallos: {failed[0]}" if failed else "")
+        Toast.notify(self.app, "*" if not failed else "!" if done else "x", "Mitigación", text, "fa5s.magic")
+        self._rescore()
+        self._update_counters()
+        self._apply_filter()
+        self._show_port_detail()
+        self._show_detail()
+
+    def _mark_finding(self, finding, how: str) -> None:
+        """Fila del diagnóstico en verde ✔ MITIGADO."""
+        self._fixed[id(finding)] = how
+        r = next(i for i, x in enumerate(self.findings) if x is finding)
+        item = self.table.item(r, 0)
+        item.setText("✔ MITIGADO")
+        item.setForeground(QColor(COLORS["ok"]))
+
+    def _rescore(self) -> None:
+        """Puntuación con la fórmula de Report.score(): cada riesgo mitigado cuenta como superado."""
+        if self.last_result is None:
+            return
+        live = [f for f in self.findings if id(f) not in self._fixed]
+        passed = sum(1 for f in self.findings if f.severity is PASS) + len(self._fixed)
+        crit = sum(1 for f in live if f.severity is CRITICAL)
+        warn = sum(1 for f in live if f.severity is WARNING)
+        total = passed + warn + 3 * crit
+        score = round(100 * passed / total) if total else 100
+        self.last_result = (score, crit, warn)
+        self.score.setText(f"{score}/100")
+        self.counts[CRITICAL].setText(str(crit))
+        self.counts[WARNING].setText(str(warn))
+        self._refresh_metrics()
 
     def _kill_owner(self) -> None:
         """Finaliza el proceso dueño del puerto con la lógica (y la confirmación) del Monitor en Vivo."""
@@ -588,6 +804,8 @@ class AuditPage(Page):
             self.status.setText("No hay ningún plugin válido en modulos/")
             return
         self.findings = []
+        self._fixed = {}
+        self.finding_inspector.setVisible(False)
         self.table.setRowCount(0)
         self._update_counters()
         for val in self.counts.values():
@@ -646,14 +864,44 @@ class AuditPage(Page):
         self.status.setText(f"Error: {msg}")
         self.app.console.log("x", f"Diagnóstico: {msg}")
 
-    def _show_detail(self) -> None:
+    def _selected_finding(self):
         r = self.table.currentRow()
-        if r < 0 or r >= len(self.findings):
+        return self.findings[r] if 0 <= r < len(self.findings) else None
+
+    def _show_detail(self) -> None:
+        f = self._selected_finding()
+        self.finding_inspector.setVisible(f is not None)
+        if f is None:
             return
-        f = self.findings[r]
-        parts = [f"{f.severity.value}  ·  {self.app.module_titles.get(f.module, f.module)}", f.title]
+        spec = finding_fix(f)
+        fixed = self._fixed.get(id(f))
+        state = "✔ MITIGADO" if fixed else f.severity.value
+        parts = [f"{state}  ·  {self.app.module_titles.get(f.module, f.module)}", f.title]
         if f.detail:
-            parts += ["", "Detalle:", f.detail]
+            parts += ["", "Detalle técnico:", f.detail]
+        if spec:
+            parts += ["", "Qué protege:", DEFENSE[spec["kind"]]]
         if f.recommendation and f.severity in (WARNING, CRITICAL):
             parts += ["", "Qué hacer:", f"➜ {f.recommendation}"]
+        if fixed:
+            parts += ["", f"✔ Mitigado: {fixed}."]
         self.detail.setPlainText("\n".join(parts))
+        admin_ok = spec is not None and spec["kind"] == "admin" and getattr(self.app, "admin", False)
+        self.harden_btn.setVisible(spec is not None and not admin_ok)
+        if spec is not None:
+            self.harden_btn.setText(spec["label"])
+            with_icon(self.harden_btn, spec["icon"], COLORS["danger"])
+            self.harden_btn.setEnabled(not fixed and not self._fixing)
+        self.harden_note.setText("Ya se ejecuta como Administrador: repite el diagnóstico." if admin_ok else
+                                 f"Se aplicará: {spec['what']}" if spec and "what" in spec else
+                                 "" if spec else "Sin remediación automática: sigue la recomendación.")
+
+    def _harden_selected(self) -> None:
+        f = self._selected_finding()
+        spec = finding_fix(f) if f is not None and id(f) not in self._fixed else None
+        if spec is None:
+            return
+        if spec["kind"] == "admin":
+            self.app.relaunch_as_admin()
+        else:
+            self._run_fixes([(f, spec)])
