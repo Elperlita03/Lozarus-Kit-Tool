@@ -16,7 +16,7 @@ from contextlib import contextmanager
 from functools import lru_cache
 from typing import Any, Callable, Iterator, Optional, Sequence, Tuple
 
-from PySide6.QtCore import (Property, QEasingCurve, QEvent, QPoint, QPointF, QPropertyAnimation, QRect,
+from PySide6.QtCore import (Property, QEasingCurve, QEvent, QLineF, QPoint, QPointF, QPropertyAnimation, QRect,
                             QRectF, QSize, QThread, QTimer, Qt, Signal)
 from PySide6.QtGui import (QBrush, QColor, QFont, QIcon, QImage, QPainter, QPainterPath, QPen, QPixmap,
                            QPolygonF, QRadialGradient)
@@ -194,11 +194,69 @@ def _particle_sprite(r: float) -> QPixmap:
     return QPixmap.fromImage(img)
 
 
+# Rayos y grietas cósmicas: cada pocos fotogramas un arco eléctrico une dos luces cercanas o una
+# grieta rasga el fondo. Viven menos de un segundo y se invalidan por SEGMENTOS (recuadros de unos
+# pocos px), nunca por su caja envolvente: un rayo en diagonal no obliga a repintar media página.
+BOLT_EVERY = (10, 36)               # fotogramas entre un rayo/grieta y el siguiente (aleatorio)
+BOLT_MAX = 3                        # simultáneos como mucho
+BOLT_LEVELS = 8                     # niveles de brillo del desvanecido (cuantizado)
+BOLT_PAD = 4                        # margen del recuadro de cada segmento (trazo del halo + antialias)
+BOLT_WHITE, BOLT_SILVER = "#FFFFFF", "#BDBDBD"
+ARC_CHANCE = 0.6                    # probabilidad de arco (si no hay pareja de luces: grieta)
+ARC_REACH = (24.0, 150.0)           # px: distancia entre las dos luces que puede unir un arco
+ARC_LIFE = 0.35                     # s
+ARC_DEPTH = 3                       # subdivisiones del zigzag: 2**3 = 8 segmentos
+CRACK_LIFE = 0.9                    # s
+CRACK_GROW = 0.25                   # s que tarda en abrirse entera
+CRACK_STEPS = (5, 9)                # segmentos del tronco
+CRACK_STEP_LEN = (9.0, 18.0)        # px por segmento
+
+
+class _Bolt:
+    # segs: [(orden, QLineF, QRect)] por orden · shown, level: lo pintado (segmentos abiertos y brillo)
+    __slots__ = ("kind", "segs", "depth", "life", "age", "shown", "level")
+
+
+def _bolt_seg(order: int, a: QPointF, b: QPointF) -> tuple:
+    box = QRectF(a, b).normalized().adjusted(-BOLT_PAD, -BOLT_PAD, BOLT_PAD, BOLT_PAD).toAlignedRect()
+    return order, QLineF(a, b), box
+
+
+def _arc_points(a: QPointF, b: QPointF, rng: random.Random) -> list:
+    """Zigzag eléctrico entre `a` y `b` por desplazamiento del punto medio."""
+    pts, jitter = [a, b], QLineF(a, b).length() * 0.18
+    for _ in range(ARC_DEPTH):
+        nxt = [pts[0]]
+        for p, q in zip(pts, pts[1:]):
+            dx, dy = q.x() - p.x(), q.y() - p.y()
+            length = math.hypot(dx, dy) or 1.0
+            off = rng.uniform(-jitter, jitter)
+            nxt += [QPointF((p.x() + q.x()) / 2 - dy / length * off, (p.y() + q.y()) / 2 + dx / length * off), q]
+        pts, jitter = nxt, jitter / 2
+    return pts
+
+
+@lru_cache(maxsize=2)
+def _bolt_pens(kind: str) -> tuple:
+    """(halo, núcleo): arco de núcleo blanco con halo plata; grieta de núcleo plata con halo blanco."""
+    glow_color, core_color, core_w = ((BOLT_SILVER, BOLT_WHITE, 1.2) if kind == "arc"
+                                      else (BOLT_WHITE, BOLT_SILVER, 1.0))
+    pens = []
+    for color, alpha, width in ((glow_color, 70 if kind == "arc" else 40, 3.0), (core_color, 255, core_w)):
+        c = QColor(color)
+        c.setAlpha(alpha)
+        pen = QPen(c, width)
+        pen.setCapStyle(Qt.PenCapStyle.RoundCap)
+        pen.setJoinStyle(Qt.PenJoinStyle.RoundJoin)
+        pens.append(pen)
+    return tuple(pens)
+
+
 class AuraHost(QWidget):
     """
-    Cuerpo de una página: pinta la luz ambiental, las partículas del fondo animado y el aura de
-    sus tarjetas DIRECTAS desde el sprite en caché. Si una tarjeta se mueve, cambia de tamaño o se
-    oculta, repinta el cuerpo (el halo sobresale del widget).
+    Cuerpo de una página: pinta la luz ambiental, las partículas del fondo animado con sus rayos y
+    grietas cósmicas, y el aura de sus tarjetas DIRECTAS desde el sprite en caché. Si una tarjeta
+    se mueve, cambia de tamaño o se oculta, repinta el cuerpo (el halo sobresale del widget).
     """
 
     def __init__(self, parent: Optional[QWidget] = None):
@@ -208,6 +266,8 @@ class AuraHost(QWidget):
         self._last_t: Optional[float] = None
         self._blockers: list = []     # zonas con aura EN VIVO (botones): ahí las luces se apagan
         self._frame = 0
+        self._bolts: list = []        # rayos y grietas vivos
+        self._next_bolt = self._rng.randint(*BOLT_EVERY)
         self._timer = QTimer(self)
         self._timer.setInterval(1000 // PARTICLE_FPS)
         self._timer.timeout.connect(self._step)
@@ -294,6 +354,97 @@ class AuraHost(QWidget):
                 self._dirty(pt.px, pt.py, pt.px, pt.py, pt.r)
             else:
                 self._dirty(x0, y0, pt.px, pt.py, pt.r)
+        self._step_bolts(area, dt)
+
+    # --- rayos y grietas cósmicas ------------------------------------------------------------
+    def _new_bolt(self, kind: str, segs: list, life: float) -> Optional[_Bolt]:
+        if not segs or any(zone.intersects(box) for _, _, box in segs for zone in self._blockers):
+            return None  # rozaría un botón con aura en vivo: lo obligaría a re-desenfocarse
+        bolt = _Bolt()
+        bolt.kind, bolt.segs, bolt.life = kind, sorted(segs, key=lambda seg: seg[0]), life
+        bolt.depth = bolt.segs[-1][0] + 1
+        bolt.age, bolt.shown, bolt.level = 0.0, 0, 0
+        return bolt
+
+    def _spawn_arc(self) -> Optional[_Bolt]:
+        """Arco entre una luz encendida y su vecina encendida más cercana (dentro de ARC_REACH)."""
+        lit = [pt for pt in self._particles if pt.level > 0]
+        if len(lit) < 2:
+            return None
+        rng, near, far = self._rng, *ARC_REACH
+        a = rng.choice(lit)
+        best, best_d = None, far
+        for pt in lit:
+            d = math.hypot(pt.px - a.px, pt.py - a.py)
+            if near <= d < best_d:
+                best, best_d = pt, d
+        if best is None:
+            return None
+        pts = _arc_points(QPointF(a.px + 0.5, a.py + 0.5), QPointF(best.px + 0.5, best.py + 0.5), rng)
+        segs = [_bolt_seg(0, p, q) for p, q in zip(pts, pts[1:])]
+        if rng.random() < 0.5:  # zarcillo: una horquilla corta desde un vértice intermedio
+            root = pts[rng.randrange(2, len(pts) - 2)]
+            angle = rng.uniform(0, 2 * math.pi)
+            for _ in range(2):
+                step = rng.uniform(5.0, 10.0)
+                tip = QPointF(root.x() + math.cos(angle) * step, root.y() + math.sin(angle) * step)
+                segs.append(_bolt_seg(0, root, tip))
+                root, angle = tip, angle + rng.uniform(-0.7, 0.7)
+        return self._new_bolt("arc", segs, ARC_LIFE)
+
+    def _spawn_crack(self, area: QRect) -> Optional[_Bolt]:
+        """Grieta: tronco quebrado con alguna rama; se abre segmento a segmento (orden = paso)."""
+        rng, segs = self._rng, []
+        pos = QPointF(rng.uniform(area.left(), area.right()), rng.uniform(area.top(), area.bottom()))
+        heading = rng.uniform(0, 2 * math.pi)
+        for i in range(rng.randint(*CRACK_STEPS)):
+            heading += rng.uniform(-0.6, 0.6)
+            step = rng.uniform(*CRACK_STEP_LEN)
+            nxt = QPointF(pos.x() + math.cos(heading) * step, pos.y() + math.sin(heading) * step)
+            segs.append(_bolt_seg(i, pos, nxt))
+            pos = nxt
+            if i and rng.random() < 0.3:  # rama: sale del nudo y se abre a la vez que el tronco
+                bpos, bhead = pos, heading + rng.choice((-1, 1)) * rng.uniform(0.6, 1.1)
+                for j in range(1, rng.randint(2, 3) + 1):
+                    blen = rng.uniform(*CRACK_STEP_LEN) * 0.6
+                    bnext = QPointF(bpos.x() + math.cos(bhead) * blen, bpos.y() + math.sin(bhead) * blen)
+                    segs.append(_bolt_seg(i + j, bpos, bnext))
+                    bpos, bhead = bnext, bhead + rng.uniform(-0.5, 0.5)
+        return self._new_bolt("crack", segs, CRACK_LIFE)
+
+    def _bolt_look(self, bolt: _Bolt) -> tuple:
+        """(segmentos abiertos, nivel de brillo) que tocaría pintar ahora."""
+        if bolt.age >= bolt.life:
+            return bolt.shown, 0
+        if bolt.kind == "arc":  # parpadeo eléctrico mientras se apaga
+            fade = (1 - bolt.age / bolt.life) * self._rng.uniform(0.55, 1.0)
+            return len(bolt.segs), round(fade * BOLT_LEVELS)
+        open_steps = math.ceil(bolt.age / CRACK_GROW * bolt.depth)
+        shown = sum(1 for order, _, _ in bolt.segs if order < open_steps)
+        fade = min(1.0, 2 * (1 - bolt.age / bolt.life))  # plena la primera mitad, luego se apaga
+        return shown, round(fade * BOLT_LEVELS)
+
+    def _step_bolts(self, area: QRect, dt: float) -> None:
+        if self._frame >= self._next_bolt:
+            self._next_bolt = self._frame + self._rng.randint(*BOLT_EVERY)
+            if len(self._bolts) < BOLT_MAX:
+                bolt = self._spawn_arc() if self._rng.random() < ARC_CHANCE else None
+                bolt = bolt or self._spawn_crack(area)
+                if bolt is not None:
+                    self._bolts.append(bolt)
+        alive = []
+        for bolt in self._bolts:
+            bolt.age += dt
+            shown, level = self._bolt_look(bolt)
+            if (shown, level) != (bolt.shown, bolt.level):
+                # mismo brillo: solo los segmentos recién abiertos; otro brillo: todos los abiertos
+                first = bolt.shown if level == bolt.level else 0
+                for _, _, box in bolt.segs[first:max(shown, bolt.shown)]:
+                    self.update(box)
+                bolt.shown, bolt.level = shown, level
+            if bolt.level > 0 or bolt.age < bolt.life:
+                alive.append(bolt)  # apagada y vencida: su último borrado ya está invalidado
+        self._bolts = alive
 
     def childEvent(self, event) -> None:
         super().childEvent(event)
@@ -317,8 +468,18 @@ class AuraHost(QWidget):
             if pt.level > 0 and region.intersects(QRect(x, y, side, side)):
                 p.setOpacity(pt.level / PARTICLE_LEVELS)          # parpadeo suave (cuantizado)
                 p.drawPixmap(x, y, sprite)
+        if self._bolts:                                           # 3) rayos y grietas
+            p.setRenderHint(QPainter.RenderHint.Antialiasing)
+            for bolt in self._bolts:
+                lines = [line for _, line, box in bolt.segs[:bolt.shown] if region.intersects(box)]
+                if bolt.level > 0 and lines:
+                    p.setOpacity(bolt.level / BOLT_LEVELS)
+                    for pen in _bolt_pens(bolt.kind):             # halo y, encima, el núcleo
+                        p.setPen(pen)
+                        p.drawLines(lines)
+            p.setRenderHint(QPainter.RenderHint.Antialiasing, False)
         p.setOpacity(1.0)
-        for child in self.children():                             # 3) halos de las tarjetas
+        for child in self.children():                             # 4) halos de las tarjetas
             radius = AURA_RADIUS.get(child.objectName()) if isinstance(child, QWidget) else None
             if radius and child.isVisible():
                 rect = child.geometry()
