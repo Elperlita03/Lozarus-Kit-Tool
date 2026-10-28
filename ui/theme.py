@@ -333,7 +333,7 @@ ICON_PATH = os.path.join(ASSETS_DIR, "lozarus.ico")
 NAV_ICONS = {
     "comando": "fa5s.tachometer-alt", "monitor": "fa5s.wave-square", "auditoria": "fa5s.shield-alt",
     "historial": "fa5s.history", "red": "fa5s.network-wired", "honeypot": "fa5s.eye",
-    "fantasma": "fa5s.ghost", "arsenal": "fa5s.user-secret",
+    "arsenal": "fa5s.user-secret",
 }
 
 

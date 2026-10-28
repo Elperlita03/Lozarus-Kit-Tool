@@ -2,27 +2,29 @@
 ui/page_arsenal.py · LOZARUS KIT TOOL
 
 Página ARSENAL & MODO FANTASMA: 12 controles en vivo (privacidad, red/USB, UX y limpieza) con perfiles
-en 1 clic y rollback. El motor (registro + rollback_state.json) vive en modulos/_arsenal.py.
+en 1 clic y rollback, seguidos de las herramientas del Modo Fantasma (hereda de GhostPage). El motor
+(registro + rollback_state.json) vive en modulos/_arsenal.py.
 """
 
 from __future__ import annotations
 
 from typing import TYPE_CHECKING, Dict, List, Optional, Tuple
 
-from PySide6.QtCore import Qt
+from PySide6.QtCore import QTimer, Qt
 from PySide6.QtWidgets import QGridLayout, QHBoxLayout, QLabel, QPushButton, QVBoxLayout
 
 from modulos import _arsenal as arsenal
 
 from ui.theme import COLORS, badge_qss
-from ui.widgets import Page, _emit_event, make_card, set_busy, with_icon
+from ui.widgets import _emit_event, make_card, set_busy, with_icon
+from ui.page_ghost import GhostPage
 from ui.dialogs import ConfirmDialog
 from ui.chrome import Toast
 
 if TYPE_CHECKING:  # solo para las anotaciones; en ejecución evita el import circular
     from gui_qt import MainWindow
 
-Op = Tuple[str, Optional[str]]  # (apply | revert | purge | debloat, clave del ajuste)
+Op = Tuple[str, Optional[str]]  # (apply | revert | purge | debloat | finish_rollback, clave del ajuste)
 
 CARDS = (("privacy", "Privacidad y anti-telemetría", "Modo Fantasma: menos datos tuyos saliendo del equipo."),
          ("network", "Blindaje de red y protección USB", "Modo Búnker: cierra vectores clásicos de la red local "
@@ -39,14 +41,18 @@ ACTIONS = (("purge", "Purgar Temporales y Caché", "Borra los ficheros no bloque
                                            "(Remove-AppxPackage).", "Quitar bloatware", "fa5s.trash-alt"))
 
 
-class ArsenalPage(Page):
-    """Matriz de ajustes con badge en vivo, Aplicar/Revertir individual y perfiles en lote."""
+class ArsenalPage(GhostPage):
+    """
+    Matriz de ajustes con badge en vivo, Aplicar/Revertir individual y perfiles en lote; debajo, las
+    herramientas del Modo Fantasma (la limpieza de %TEMP% la cubre la purga del Arsenal).
+    """
+    TOOL_CARDS = tuple(c for c in GhostPage.TOOL_CARDS if c != "_build_temp_card")
 
     def __init__(self, app: "MainWindow"):
-        super().__init__("Arsenal & Modo Fantasma",
-                         "12 controles en vivo: privacidad, red/USB, UX y limpieza. Cada cambio guarda antes el "
-                         "valor original en rollback_state.json para poder revertirlo.", "fa5s.user-secret")
-        self.app = app
+        super().__init__(app, "Arsenal & Modo Fantasma",
+                         "12 controles en vivo: privacidad, red/USB, UX y limpieza, más las herramientas del "
+                         "Modo Fantasma. Cada ajuste guarda antes el valor original en rollback_state.json "
+                         "para poder revertirlo.", "fa5s.user-secret")
         self._snap: Optional[dict] = None
         self._busy = False
         self._rows: Dict[str, dict] = {}       # clave -> {badge, apply, revert} / {badge, run}
@@ -68,10 +74,10 @@ class ArsenalPage(Page):
             bar.addWidget(btn, 1)
             bar.addWidget(badge)
             self._profile_btns[key], self._profile_badges[key] = btn, badge
-        self.root.addLayout(bar)
+        self.root.insertLayout(0, bar)  # encima de las herramientas del Modo Fantasma
 
         # --- Matriz de 12 controles en 3 tarjetas -----------------------------------------------
-        for card_key, title, desc in CARDS:
+        for index, (card_key, title, desc) in enumerate(CARDS, 1):
             box, lay = make_card(title, desc)
             grid = QGridLayout()
             grid.setHorizontalSpacing(10)
@@ -84,8 +90,11 @@ class ArsenalPage(Page):
                 for r, action in enumerate(ACTIONS, len(items)):
                     self._add_action_row(grid, r, *action)
             lay.addLayout(grid)
-            self.root.addWidget(box)
-        self.root.addStretch(1)
+            self.root.insertWidget(index, box)
+        tools = QLabel("Herramientas del Modo Fantasma")
+        tools.setObjectName("CardTitle")
+        tools.setStyleSheet("margin-top:6px;")
+        self.root.insertWidget(len(CARDS) + 1, tools)
         self._render()
 
     # --- Construcción ---------------------------------------------------------------------------
@@ -114,8 +123,8 @@ class ArsenalPage(Page):
     def _add_tweak_row(self, grid: QGridLayout, r: int, tweak) -> None:
         grid.addLayout(self._text(tweak.title + ("  · HKLM" if tweak.admin else ""), tweak.desc), r, 0)
         badge = QLabel()
-        apply_btn = self._button("Aplicar", "fa5s.check", lambda: self._run([("apply", tweak.key)]))
-        revert_btn = self._button("Revertir", "fa5s.undo", lambda: self._run([("revert", tweak.key)]))
+        apply_btn = self._button("Aplicar", "fa5s.check", lambda: self._execute([("apply", tweak.key)]))
+        revert_btn = self._button("Revertir", "fa5s.undo", lambda: self._execute([("revert", tweak.key)]))
         apply_btn.setToolTip("\n".join(arsenal.describe(v) for v in tweak.values))
         for c, w in enumerate((badge, apply_btn, revert_btn), 1):
             grid.addWidget(w, r, c)
@@ -124,7 +133,7 @@ class ArsenalPage(Page):
     def _add_action_row(self, grid: QGridLayout, r: int, key, title, desc, button, icon_name) -> None:
         grid.addLayout(self._text(title, desc), r, 0)
         badge = QLabel()
-        run_btn = self._button(button, icon_name, lambda: self._run([(key, None)]))
+        run_btn = self._button(button, icon_name, lambda: self._execute([(key, None)]))
         grid.addWidget(badge, r, 1)
         grid.addWidget(run_btn, r, 2, 1, 2)
         self._rows[key] = {"badge": badge, "run": run_btn, "last": None}
@@ -192,6 +201,8 @@ class ArsenalPage(Page):
             return
         if key == "rollback":
             ops: List[Op] = [("revert", k) for k in self._backed_up() if k in arsenal.BY_KEY]
+            if self._backed_up():
+                ops.append(("finish_rollback", None))  # limpia rollback_state.json al terminar
         else:
             card = next(c for k, _t, _i, c in PROFILES if k == key)
             ops = [("apply", t.key) for t in arsenal.TWEAKS if t.card == card and not self._applied(t.key)]
@@ -200,7 +211,7 @@ class ArsenalPage(Page):
         if not ops:
             Toast.notify(self.app, "*", "Arsenal", "Nada que hacer: el perfil ya está en ese estado.", "fa5s.ghost")
             return
-        self._run(ops, profile=next(t for k, t, _i, _c in PROFILES if k == key))
+        self._execute(ops, profile=next(t for k, t, _i, _c in PROFILES if k == key))
 
     @staticmethod
     def _needs_admin(op: Op) -> bool:
@@ -212,13 +223,15 @@ class ArsenalPage(Page):
             return "• Purgar los ficheros no bloqueados de %TEMP% y C:\\Windows\\Temp"
         if kind == "debloat":
             return "• Remove-AppxPackage: " + ", ".join(arsenal.BLOATWARE)
+        if kind == "finish_rollback":
+            return "• Limpiar rollback_state.json (se borra si no queda nada pendiente)"
         tweak = arsenal.BY_KEY[key]
         if kind == "apply":
             return f"• {tweak.title}: " + "; ".join(arsenal.describe(v) for v in tweak.values)
         how = "valor original del respaldo" if key in self._backed_up() else "borrar el valor (por defecto de Windows)"
         return f"• Revertir {tweak.title}: {how}"
 
-    def _run(self, ops: List[Op], profile: Optional[str] = None) -> None:
+    def _execute(self, ops: List[Op], profile: Optional[str] = None) -> None:
         """Elevación (HKLM), una confirmación con lo exacto que se aplicará y ejecución en segundo plano."""
         if self._busy or not ops:
             return
@@ -240,7 +253,7 @@ class ArsenalPage(Page):
                 return
         title = profile or {"purge": "Purgar temporales", "debloat": "Debloater rápido"}.get(
             ops[0][0], arsenal.BY_KEY[ops[0][1]].title if ops[0][1] else "Arsenal")
-        rollback = all(kind == "revert" for kind, _ in ops)
+        rollback = all(kind in ("revert", "finish_rollback") for kind, _ in ops)
         if not ConfirmDialog.ask(self.app, title, "Se aplicará exactamente:\n" + "\n".join(map(self._describe, ops))
                                  + "\n\nLos valores originales del registro se guardan antes en rollback_state.json."
                                  "\n¿Continuar?", confirm_text="Revertir" if rollback else "Aplicar",
@@ -254,7 +267,8 @@ class ArsenalPage(Page):
         self.app.log_tactical(f"Arsenal: {title} · {len(ops)} operación(es)")
         funcs = {"apply": lambda k: arsenal.apply(arsenal.BY_KEY[k]),
                  "revert": lambda k: arsenal.revert(arsenal.BY_KEY[k]),
-                 "purge": lambda _k: arsenal.purge_temp(), "debloat": lambda _k: arsenal.debloat()}
+                 "purge": lambda _k: arsenal.purge_temp(), "debloat": lambda _k: arsenal.debloat(),
+                 "finish_rollback": lambda _k: arsenal.finish_rollback()}
 
         def work(emit):
             results = []
@@ -276,8 +290,12 @@ class ArsenalPage(Page):
             self._render()
             return
         results, self._snap = res
-        good, notes = 0, []
-        for (kind, key), (done, info) in zip(ops, results):
+        good, notes, explorer = 0, [], []
+        pairs = list(zip(ops, results))
+        for (kind, key), (done, info) in pairs:
+            if kind == "finish_rollback":
+                self._rollback_event(pairs, done, info)
+                continue
             _emit_event(self.app, source="arsenal", event_type="arsenal.rollback" if kind == "revert"
                         else "arsenal.toggle", payload={"op": kind, "tweak": key, "ok": done, "detail": info})
             name = arsenal.BY_KEY[key].title if key else title
@@ -286,6 +304,8 @@ class ArsenalPage(Page):
                 notes.append(f"{name}: {info}")
                 continue
             good += 1
+            if kind in ("apply", "revert") and arsenal.BY_KEY[key].explorer:
+                explorer.append(arsenal.BY_KEY[key].title)
             if kind == "purge":
                 mb = info["bytes"] / 1048576
                 self._rows["purge"]["last"] = f"{mb:.1f} MB"
@@ -295,9 +315,49 @@ class ArsenalPage(Page):
                 self._rows["debloat"]["last"] = f"{len(info['removed'])} QUITADOS"
                 notes.append(f"{len(info['removed'])} paquete(s) eliminados" if info["removed"]
                              else "Ningún paquete de la lista estaba instalado")
-        failed = len(ops) - good
-        verb = "revertidos" if all(kind == "revert" for kind, _ in ops) else "aplicados"
-        head = f"{good} de {len(ops)} cambios {verb}." if len(ops) > 1 else ("Hecho." if good else "Falló.")
-        Toast.notify(self.app, "x" if not good else "!" if failed else "*", title,
-                     " ".join([head] + notes[:2]), "fa5s.ghost")
+        changes = sum(1 for kind, _ in ops if kind != "finish_rollback")
+        failed = changes - good
+        verb = "revertidos" if all(kind in ("revert", "finish_rollback") for kind, _ in ops) else "aplicados"
+        head = f"{good} de {changes} cambios {verb}." if changes > 1 else ("Hecho." if good else "Falló.")
+        if changes:
+            Toast.notify(self.app, "x" if not good else "!" if failed else "*", title,
+                         " ".join([head] + notes[:2]), "fa5s.ghost")
         self._render()
+        if explorer:  # tras pintar el resultado: el diálogo no bloquea el repintado
+            QTimer.singleShot(0, lambda: self._offer_explorer_restart(explorer))
+
+    def _rollback_event(self, pairs: list, done: bool, info) -> None:
+        """Resumen de «Revertir Todo» en la Caja Negra: qué se revirtió, qué falló y si el JSON se limpió."""
+        reverted = [key for (kind, key), (ok, _i) in pairs if kind == "revert" and ok]
+        failed = [key for (kind, key), (ok, _i) in pairs if kind == "revert" and not ok]
+        payload = {"op": "rollback_all", "ok": done and not failed, "reverted": reverted, "failed": failed}
+        payload.update(info if done else {"error": info})
+        _emit_event(self.app, source="arsenal", event_type="arsenal.rollback", payload=payload)
+        cleaned = done and info.get("state_file_removed")
+        self.app.console.log("*" if cleaned else "!", "Arsenal · Revertir Todo: " + (
+            "rollback_state.json limpiado" if cleaned else
+            f"quedan respaldos pendientes: {', '.join(info['remaining'])}" if done else f"error al limpiar: {info}"))
+        if not reverted and not failed:  # solo había respaldos huérfanos: el Toast general no sale
+            Toast.notify(self.app, "*" if cleaned else "x", "Revertir Todo",
+                         "Respaldo limpiado." if cleaned else "No se pudo limpiar el respaldo.", "fa5s.undo")
+
+    # --- Reinicio del Explorador ------------------------------------------------------------------
+    def _offer_explorer_restart(self, titles: List[str]) -> None:
+        if not ConfirmDialog.ask(self.app, "Reiniciar el Explorador",
+                                 f"{', '.join(titles)}: el cambio se ve al reiniciar explorer.exe.\n\n"
+                                 "La barra de tareas y las ventanas de carpetas desaparecerán unos segundos; "
+                                 "tus programas y documentos siguen abiertos. ¿Reiniciar el Explorador ahora?",
+                                 confirm_text="Reiniciar Explorador"):
+            Toast.notify(self.app, "*", "Explorador", "El cambio se verá al reiniciar el Explorador o la sesión.",
+                         "fa5s.sync-alt")
+            return
+        self.app.log_tactical("Arsenal: reiniciando explorer.exe")
+        self.app.run_task(lambda emit: arsenal.restart_explorer(), self._explorer_done)
+
+    def _explorer_done(self, ok: bool, res) -> None:
+        good = ok and isinstance(res, dict)
+        _emit_event(self.app, source="arsenal", event_type="arsenal.toggle",
+                    payload={"op": "restart_explorer", "tweak": None, "ok": good, "detail": res})
+        Toast.notify(self.app, "*" if good else "x", "Explorador",
+                     f"explorer.exe reiniciado ({res['how']})." if good else f"No se pudo reiniciar: {res}",
+                     "fa5s.sync-alt")

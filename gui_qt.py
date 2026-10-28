@@ -70,7 +70,6 @@ from ui.page_monitor import MonitorPage, ProcessMonitor  # noqa: E402
 from ui.page_audit import AuditPage  # noqa: E402
 from ui.page_network import NetworkPage  # noqa: E402
 from ui.page_honeypot import HoneypotPage  # noqa: E402
-from ui.page_ghost import GhostPage  # noqa: E402
 from ui.page_arsenal import ArsenalPage  # noqa: E402
 from ui.page_history import HistorialPage  # noqa: E402
 
@@ -231,11 +230,11 @@ class MainWindow(QMainWindow):
     NAV = [("comando", "Centro de Comando"), ("monitor", "Monitor en Vivo"),
            ("auditoria", "Escaneo de Vectores"), ("historial", "Historial"),
            ("red", "Endurecimiento de Red"), ("honeypot", "Honeypot"),
-           ("fantasma", "Modo Fantasma"), ("arsenal", "Arsenal & Modo Fantasma")]
+           ("arsenal", "Arsenal & Modo Fantasma")]
 
     NAV_SECTORS = [
         ("CENTRO DE CONTROL", ["comando", "monitor"]),
-        ("SISTEMA Y PERÍMETRO", ["auditoria", "red", "fantasma", "arsenal"]),
+        ("SISTEMA Y PERÍMETRO", ["auditoria", "red", "arsenal"]),
         ("LABORATORIO Y REGISTRO", ["honeypot", "historial"]),
     ]
 
@@ -317,7 +316,7 @@ class MainWindow(QMainWindow):
         self.pages = {"comando": CommandPage(self), "monitor": MonitorPage(self),
                       "auditoria": AuditPage(self), "historial": HistorialPage(self),
                       "red": NetworkPage(self), "honeypot": HoneypotPage(self),
-                      "fantasma": GhostPage(self), "arsenal": ArsenalPage(self)}
+                      "arsenal": ArsenalPage(self)}
         for page in self.pages.values():
             self.stack.addWidget(page)
         body.addWidget(self.stack, 1)
@@ -723,7 +722,7 @@ class MainWindow(QMainWindow):
     def apply_profile(self, mode: str) -> None:
         """Aplica un perfil de operación de 1 clic ajustando ritmos de sondeo y monitores."""
         cmd, mon, net, gh = (self.pages["comando"], self.pages["monitor"],
-                             self.pages["red"], self.pages["fantasma"])
+                             self.pages["red"], self.pages["arsenal"])
         for k, b in cmd.profile_btns.items():
             b.setChecked(k == mode)
         if mode == "rendimiento":

@@ -37,13 +37,21 @@ BATTERY_LOW_PCT = 20         # por debajo, y sin cargador, la batería se marca 
 
 
 class GhostPage(Page):
-    def __init__(self, app: "MainWindow"):
-        super().__init__("Modo Fantasma",
-                         "Herramientas de privacidad y limpieza de ESTE equipo. Las acciones "
-                         "destructivas piden confirmación. La vigilancia del portapapeles avisa y, si "
-                         "detecta el cambio de dirección típico de un clipper, vacía el portapapeles; "
-                         "no elimina el malware.",
-                         "fa5s.ghost")
+    """
+    Herramientas del Modo Fantasma. Ya no es una sección propia del menú: ArsenalPage (page_arsenal.py)
+    hereda de ella y pone sus tarjetas bajo los ajustes del Arsenal, con su propia cabecera.
+    """
+    # Tarjetas de herramientas, en orden (una subclase puede omitir alguna).
+    TOOL_CARDS = ("_build_shredder_card", "_build_clipboard_card", "_build_ram_card", "_build_temp_card",
+                  "_build_purge_card")
+
+    def __init__(self, app: "MainWindow", title: str = "Modo Fantasma",
+                 subtitle: str = "Herramientas de privacidad y limpieza de ESTE equipo. Las acciones "
+                                 "destructivas piden confirmación. La vigilancia del portapapeles avisa y, si "
+                                 "detecta el cambio de dirección típico de un clipper, vacía el portapapeles; "
+                                 "no elimina el malware.",
+                 icon_name: str = "fa5s.ghost"):
+        super().__init__(title, subtitle, icon_name)
         self.app = app
         self._clip_last = None
         self._clip_last_time = None
@@ -54,11 +62,8 @@ class GhostPage(Page):
         self._autoruns_done = False
 
         body = self.root
-        body.addWidget(self._build_shredder_card())
-        body.addWidget(self._build_clipboard_card())
-        body.addWidget(self._build_ram_card())
-        body.addWidget(self._build_temp_card())
-        body.addWidget(self._build_purge_card())
+        for builder in self.TOOL_CARDS:
+            body.addWidget(getattr(self, builder)())
         self._add_health_section(body)
         body.addWidget(self._build_autoruns_card())
         body.addStretch(1)
@@ -188,7 +193,7 @@ class GhostPage(Page):
             self.app.console.log("x", "¡Clipper bloqueado! El portapapeles cambió de dirección cripto; "
                                       "se vació para que no pegaras la del atacante.")
             self.app.record_alert("x", "Clipper bloqueado: el portapapeles cambió de dirección cripto "
-                                       "y se vació en el acto.", module="fantasma")
+                                       "y se vació en el acto.", module="arsenal")
             _emit_event(self.app, source="fantasma:portapapeles",
                         event_type="clipboard.hijack_blocked",
                         observation=(ObservationQuality.COMPLETE if ObservationQuality else None),
@@ -200,7 +205,7 @@ class GhostPage(Page):
         sensible, etiqueta = looks_sensitive(text)
         if sensible:
             self.app.console.log("!", f"Portapapeles: contenido sensible detectado — {etiqueta}")
-            self.app.record_alert("!", f"Portapapeles: contenido sensible — {etiqueta}", module="fantasma")
+            self.app.record_alert("!", f"Portapapeles: contenido sensible — {etiqueta}", module="arsenal")
             _emit_event(self.app, source="fantasma:portapapeles", event_type="clipboard.sensitive",
                         payload={"clasificacion": etiqueta, "longitud": len(text)})
             if self.autopurge_btn.isChecked():

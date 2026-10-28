@@ -48,7 +48,7 @@ AP_RAM_POLL_MS = 5000
 COMPONENT_PAGE = {
     "Motor de auditoría": "auditoria", "Telemetría de procesos": "monitor", "Honeypot": "honeypot",
     "Persistencia Táctica": "honeypot", "Caja Negra": "historial", "Endurecimiento de Red": "red",
-    "Modo Fantasma (herramientas)": "fantasma", "Laboratorio Forense": "historial",
+    "Modo Fantasma (herramientas)": "arsenal", "Laboratorio Forense": "historial",
     "Núcleo de eventos (bus)": "historial", "OBSIDIAN (salud de telemetría)": "comando",
 }
 
@@ -111,7 +111,7 @@ AREAS = [
     ("fa5s.eye", "Defensa y engaño", "Honeypot y señuelos defensivos.", "honeypot"),
     ("fa5s.network-wired", "Perímetro y dispositivos", "Red (ICMP) y control de USB.", "red"),
     ("fa5s.fingerprint", "Laboratorio forense", "Snapshots e historial del sistema.", "historial"),
-    ("fa5s.ghost", "Modo Fantasma", "Privacidad, anti-clipper y limpieza.", "fantasma"),
+    ("fa5s.ghost", "Arsenal & Modo Fantasma", "Privacidad, anti-telemetría y limpieza.", "arsenal"),
     ("fa5s.vial", "Mesa de Autopsias", "Análisis estático de archivos sospechosos.", "historial"),
 ]
 
@@ -576,7 +576,7 @@ class CommandPage(Page):
         if net is not None and hasattr(net, "_watch_timer"):
             live["net_watch"] = net._watch_timer.isActive()
             live["net_watch_ports"] = len(net._baseline or ())
-        ghost = pages.get("fantasma")
+        ghost = pages.get("arsenal")
         if ghost is not None and hasattr(ghost, "_clip_timer"):
             live["clip_watch"] = ghost._clip_timer.isActive()
             live["autopurge"] = ghost.autopurge_btn.isChecked()

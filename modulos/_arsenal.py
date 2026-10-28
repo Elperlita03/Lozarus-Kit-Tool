@@ -11,13 +11,15 @@ from __future__ import annotations
 
 import json
 import os
+import subprocess
+import time
 from dataclasses import dataclass
 from typing import Dict, List, Optional, Tuple
 
 from ._base import IS_WINDOWS
 from ._forense import FORENSICS_DIR
 from ._privacidad import clean_temp, temp_dir
-from ._utilidades import powershell_raw
+from ._utilidades import HAS_PSUTIL, is_admin, powershell_raw, psutil, run_cmd
 
 STATE_FILE = os.path.join(FORENSICS_DIR, "rollback_state.json")
 
@@ -34,6 +36,7 @@ class Tweak:
     desc: str
     values: Tuple[RegValue, ...]
     own_keys: Tuple[Tuple[str, str], ...] = ()  # claves que se borran al revertir si Lozarus las creó
+    explorer: bool = False  # el cambio solo se ve tras reiniciar explorer.exe
 
     @property
     def admin(self) -> bool:
@@ -46,7 +49,8 @@ TWEAKS: List[Tweak] = [
           (("HKLM", r"SOFTWARE\Policies\Microsoft\Windows\DataCollection", "AllowTelemetry", 0),)),
     Tweak("bing", "privacy", "Desactivar Bing y Búsqueda Web en Inicio",
           "Lo que escribes en el menú Inicio deja de enviarse a Bing.",
-          (("HKCU", r"Software\Policies\Microsoft\Windows\Explorer", "DisableSearchBoxSuggestions", 1),)),
+          (("HKCU", r"Software\Policies\Microsoft\Windows\Explorer", "DisableSearchBoxSuggestions", 1),),
+          explorer=True),
     Tweak("adid", "privacy", "Bloquear ID Publicitario",
           "Las apps no pueden perfilarte entre sí con un identificador publicitario común.",
           (("HKCU", r"Software\Microsoft\Windows\CurrentVersion\AdvertisingInfo", "Enabled", 0),)),
@@ -68,11 +72,12 @@ TWEAKS: List[Tweak] = [
     Tweak("extensions", "ux", "Revelar Extensiones y Ocultos",
           "Desenmascara «factura.pdf.exe». Reinicia el Explorador para verlo.",
           (("HKCU", r"Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced", "HideFileExt", 0),
-           ("HKCU", r"Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced", "Hidden", 1))),
+           ("HKCU", r"Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced", "Hidden", 1)),
+          explorer=True),
     Tweak("classic_menu", "ux", "Menú Contextual Clásico (Windows 11)",
           "Recupera el menú del botón derecho completo. Reinicia el Explorador para verlo.",
           (("HKCU", CLASSIC_MENU + r"\InprocServer32", "", ""),),
-          own_keys=(("HKCU", CLASSIC_MENU + r"\InprocServer32"), ("HKCU", CLASSIC_MENU))),
+          own_keys=(("HKCU", CLASSIC_MENU + r"\InprocServer32"), ("HKCU", CLASSIC_MENU)), explorer=True),
 ]
 BY_KEY: Dict[str, Tweak] = {t.key: t for t in TWEAKS}
 
@@ -150,11 +155,29 @@ def load_state() -> dict:
 
 
 def save_state(state: dict) -> None:
+    """Escritura atómica; sin respaldos pendientes el fichero se borra (no queda un «{}» huérfano)."""
+    if not state:
+        try:
+            os.remove(STATE_FILE)
+        except FileNotFoundError:
+            pass
+        return
     os.makedirs(os.path.dirname(STATE_FILE), exist_ok=True)
     tmp = STATE_FILE + ".tmp"
     with open(tmp, "w", encoding="utf-8") as fh:
         json.dump(state, fh, ensure_ascii=False, indent=2)
     os.replace(tmp, STATE_FILE)  # escritura atómica: un corte no deja el respaldo a medias
+
+
+def finish_rollback() -> dict:
+    """Cierre de «Revertir Todo»: descarta respaldos de ajustes que ya no existen en TWEAKS y borra
+    rollback_state.json si no queda nada pendiente. Lo que falló al revertir se conserva."""
+    state = load_state()
+    orphans = sorted(k for k in state if k not in BY_KEY)
+    for key in orphans:
+        del state[key]
+    save_state(state)
+    return {"remaining": sorted(state), "orphans_dropped": orphans, "state_file_removed": not os.path.exists(STATE_FILE)}
 
 
 def snapshot() -> dict:
@@ -232,5 +255,31 @@ def debloat() -> dict:
     return {"removed": removed, "requested": list(BLOATWARE)}
 
 
+def _explorer_running() -> bool:
+    if not HAS_PSUTIL:
+        return False
+    return any((p.info.get("name") or "").lower() == "explorer.exe" for p in psutil.process_iter(["name"]))
+
+
+def restart_explorer() -> dict:
+    """
+    Reinicia el shell (explorer.exe) para que los ajustes del Explorador se vean al momento. Windows
+    suele relanzarlo solo (AutoRestartShell); si no, se arranca de nuevo. Desde un Lozarus elevado se
+    lanza con un token sin privilegios (runas /trustlevel) para no dejar un Explorador de Administrador.
+    """
+    run_cmd(["taskkill", "/f", "/im", "explorer.exe"])
+    for _ in range(10):  # hasta 5 s esperando al relanzamiento automático
+        time.sleep(0.5)
+        if _explorer_running():
+            return {"restarted": True, "how": "automático (AutoRestartShell)"}
+    exe = os.path.join(os.environ.get("SystemRoot", r"C:\Windows"), "explorer.exe")
+    if is_admin():
+        rc, _out, _err = run_cmd(["runas", "/trustlevel:0x20000", exe])
+        if rc == 0:
+            return {"restarted": True, "how": "runas /trustlevel (sin privilegios)"}
+    subprocess.Popen([exe], creationflags=getattr(subprocess, "DETACHED_PROCESS", 0))
+    return {"restarted": True, "how": "relanzado por Lozarus"}
+
+
 __all__ = ["IS_WINDOWS", "TWEAKS", "BY_KEY", "BLOATWARE", "STATE_FILE", "Tweak", "apply", "revert",
-           "snapshot", "load_state", "describe", "purge_temp", "debloat"]
+           "snapshot", "load_state", "describe", "purge_temp", "debloat", "finish_rollback", "restart_explorer"]
