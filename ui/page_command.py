@@ -17,8 +17,8 @@ from typing import TYPE_CHECKING, Optional
 
 import psutil
 from PySide6.QtCore import QTimer, Qt
-from PySide6.QtWidgets import (QCheckBox, QFrame, QGridLayout, QHBoxLayout, QLabel, QPushButton,
-                               QVBoxLayout)
+from PySide6.QtWidgets import (QCheckBox, QFrame, QGridLayout, QHBoxLayout, QLabel, QProgressBar,
+                               QPushButton, QVBoxLayout)
 
 from modulos._alertas import HAS_PLYER
 from modulos._contencion import quarantine_active
@@ -27,13 +27,15 @@ from modulos._privacidad import clean_temp, empty_working_sets
 from modulos._forense import list_snapshots
 from modulos._obsidian import events_per_minute, health_score, jsonl_size_kb, process_vitals
 from modulos._tacticas import sandbox_available
+from modulos._puntuacion import LABELS, WEIGHTS
 from modulos._utilidades import HAS_PSUTIL, _powershell_exe, is_admin
 
 from ui.theme import (COLORS, MONO_CSS, STATE_STYLE, ST_ALERT, ST_DEGRADED, ST_NOIMPL, ST_OK,
                       ST_STOPPED, badge_qss)
-from ui.widgets import (BentoCard, Gauge, HealthBadge, Page, PulseGraph, Worker, _emit_event, frozen,
-                        icon, make_card, set_busy, with_icon)
+from ui.widgets import (BentoCard, Gauge, HealthBadge, Page, PulseGraph, ScoreRing, Worker, _emit_event,
+                        frozen, icon, make_card, set_busy, tech_tip, with_icon)
 from ui.chrome import Toast
+from ui.informe import REPORTS_DIR, compute_security, export_report
 
 if TYPE_CHECKING:  # solo para las anotaciones; en ejecución evita el import circular
     from gui_qt import MainWindow
@@ -330,6 +332,9 @@ class CommandPage(Page):
         super().__init__("Centro de Comando",
                          "Telemetría del sistema y acceso rápido a la defensa local.", "fa5s.tachometer-alt")
         self.app = app
+        self._sec_last = None          # último estado pintado de la puntuación (evita re-estilizar cada tic)
+        self._sec_target = "auditoria"  # página a la que lleva «Mejorar la nota»
+        self.root.addWidget(self._build_security_card())
 
         # --- Cabecera de telemetría en vivo ---
         tele = QFrame()
@@ -632,6 +637,97 @@ class CommandPage(Page):
                 ("Privilegios", "Administrador" if self.app.admin else "Estándar (parcial)"),
                 ("Módulos", f"{len(self.app.modules)} plugins")]
 
+    # --- Puntuación de Seguridad del Sistema ---------------------------------------------------
+    def _build_security_card(self) -> QFrame:
+        box = QFrame()
+        box.setObjectName("Card")
+        lay = QHBoxLayout(box)
+        lay.setContentsMargins(24, 20, 24, 20)
+        lay.setSpacing(28)
+        self.sec_ring = ScoreRing(150)
+        lay.addWidget(self.sec_ring)
+        col = QVBoxLayout()
+        col.setSpacing(8)
+        cap = QLabel("PUNTUACIÓN DE SEGURIDAD DEL SISTEMA")
+        cap.setObjectName("ChipCap")
+        self.sec_grade = QLabel("SIN DATOS")
+        self.sec_grade.setStyleSheet(f"color:{COLORS['faint']}; font-size:20px; font-weight:bold; letter-spacing:1px;")
+        col.addWidget(cap)
+        col.addWidget(self.sec_grade)
+        self.sec_bars = {}
+        for key, label in LABELS.items():
+            row = QHBoxLayout()
+            row.setSpacing(12)
+            name = QLabel(f"{label} · {WEIGHTS[key]:.0%}")
+            name.setObjectName("CardText")
+            name.setFixedWidth(230)
+            bar = QProgressBar()
+            bar.setRange(0, 100)
+            bar.setTextVisible(False)
+            val = QLabel("sin datos")
+            val.setFixedWidth(76)
+            val.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+            val.setStyleSheet(f"color:{COLORS['muted']}; font-family:{MONO_CSS}; font-size:12px;")
+            row.addWidget(name)
+            row.addWidget(bar, 1)
+            row.addWidget(val)
+            col.addLayout(row)
+            self.sec_bars[key] = (bar, val)
+        self.sec_next = QLabel("")
+        self.sec_next.setObjectName("CardText")
+        self.sec_next.setWordWrap(True)
+        col.addWidget(self.sec_next)
+        lay.addLayout(col, 1)
+        actions = QVBoxLayout()
+        actions.setSpacing(10)
+        self.report_btn = QPushButton("Exportar Informe HTML")
+        self.report_btn.setObjectName("Primary")
+        self.report_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        with_icon(self.report_btn, "fa5s.file-export")
+        self.report_btn.setToolTip(tech_tip("Informe de auditoría técnica (HTML)", [REPORTS_DIR],
+                                            "Diseño oscuro autocontenido: puntuación, vectores mitigados, "
+                                            "riesgos pendientes, Arsenal y puertos."))
+        self.report_btn.clicked.connect(lambda: export_report(self.app))
+        self.improve_btn = QPushButton("Mejorar la nota")
+        self.improve_btn.setObjectName("Ghost")
+        self.improve_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        with_icon(self.improve_btn, "fa5s.arrow-up", COLORS["muted"])
+        self.improve_btn.clicked.connect(lambda: self.app._select(self._sec_target))
+        actions.addStretch(1)
+        actions.addWidget(self.report_btn)
+        actions.addWidget(self.improve_btn)
+        actions.addStretch(1)
+        lay.addLayout(actions)
+        return box
+
+    def _update_security(self) -> None:
+        """Recalcula la nota con el estado VIVO del Escaneo de Vectores y del Arsenal (lectura barata)."""
+        result, step, inputs = compute_security(self.app)
+        state = (result and (result["score"], tuple(sorted(result["parts"].items()))), step)
+        if state == self._sec_last:
+            return
+        self._sec_last = state
+        score = result["score"] if result else None
+        self.sec_ring.set_score(score)
+        color = ScoreRing.color_for(score)
+        self.sec_grade.setText(f"{result['letter']} · {result['label']}" if result else "SIN DATOS")
+        self.sec_grade.setStyleSheet(f"color:{color}; font-size:20px; font-weight:bold; letter-spacing:1px;")
+        parts = result["parts"] if result else {}
+        for key, (bar, val) in self.sec_bars.items():
+            v = parts.get(key)
+            bar.setValue(v or 0)
+            c = ScoreRing.color_for(v)
+            bar.setStyleSheet(f"QProgressBar::chunk {{ background:{c}; border-radius:3px; }}")
+            val.setText("sin datos" if v is None else f"{v}/100")
+            val.setStyleSheet(f"color:{c if v is not None else COLORS['muted']}; font-family:{MONO_CSS}; "
+                              "font-size:12px;")
+        self.sec_ring.setToolTip(tech_tip("Cómo se calcula", [f"{LABELS[k]}: {v}/100 × {WEIGHTS[k]:.0%}"
+                                                              for k, v in parts.items()],
+                                          "Media ponderada; lo que aún no se ha medido no cuenta y su peso "
+                                          "se reparte entre el resto."))
+        self.sec_next.setText(f"➜ {step}")
+        self._sec_target = "auditoria" if "audit" not in parts or inputs["pending"] else "arsenal"
+
     def _tick(self) -> None:
         if not self.isVisible():
             return  # oculta tras otra pestaña: nada que pintar (se refresca en showEvent)
@@ -676,6 +772,7 @@ class CommandPage(Page):
             self.shield_icon.setPixmap(icon("fa5s.shield-alt", color).pixmap(48, 48))
             self.shield_state.setText("ACTIVO" if protected else "EN REPOSO")
             self.shield_state.setStyleSheet(f"color:{color}; font-size:11px; font-weight:bold;")
+        self._update_security()
         for bcard in self.cards:
             bcard.refresh()
 

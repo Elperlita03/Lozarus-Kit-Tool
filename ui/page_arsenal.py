@@ -16,7 +16,7 @@ from PySide6.QtWidgets import QGridLayout, QHBoxLayout, QLabel, QPushButton, QVB
 from modulos import _arsenal as arsenal
 
 from ui.theme import COLORS, badge_qss
-from ui.widgets import _emit_event, make_card, set_busy, with_icon
+from ui.widgets import _emit_event, flash_aura, make_card, set_busy, tech_tip, with_icon
 from ui.page_ghost import GhostPage
 from ui.dialogs import ConfirmDialog
 from ui.chrome import Toast
@@ -96,6 +96,7 @@ class ArsenalPage(GhostPage):
         tools.setStyleSheet("margin-top:6px;")
         self.root.insertWidget(len(CARDS) + 1, tools)
         self._render()
+        QTimer.singleShot(0, self.refresh)  # la Puntuación de Seguridad lo necesita sin abrir la pestaña
 
     # --- Construcción ---------------------------------------------------------------------------
     @staticmethod
@@ -123,9 +124,14 @@ class ArsenalPage(GhostPage):
     def _add_tweak_row(self, grid: QGridLayout, r: int, tweak) -> None:
         grid.addLayout(self._text(tweak.title + ("  · HKLM" if tweak.admin else ""), tweak.desc), r, 0)
         badge = QLabel()
-        apply_btn = self._button("Aplicar", "fa5s.check", lambda: self._execute([("apply", tweak.key)]))
-        revert_btn = self._button("Revertir", "fa5s.undo", lambda: self._execute([("revert", tweak.key)]))
-        apply_btn.setToolTip("\n".join(arsenal.describe(v) for v in tweak.values))
+        apply_btn = self._button("Aplicar", "fa5s.check",
+                                 lambda: self._execute([("apply", tweak.key)], button=apply_btn))
+        revert_btn = self._button("Revertir", "fa5s.undo",
+                                  lambda: self._execute([("revert", tweak.key)], button=revert_btn))
+        notes = ["el valor actual se guarda antes en rollback_state.json"]
+        notes += ["requiere Administrador"] * tweak.admin + ["se ve tras reiniciar el Explorador"] * tweak.explorer
+        apply_btn.setToolTip(tech_tip(f"Aplicar · {tweak.title}", [arsenal.describe(v) for v in tweak.values],
+                                      "; ".join(notes)[:1].upper() + "; ".join(notes)[1:] + "."))
         for c, w in enumerate((badge, apply_btn, revert_btn), 1):
             grid.addWidget(w, r, c)
         self._rows[tweak.key] = {"badge": badge, "apply": apply_btn, "revert": revert_btn}
@@ -133,7 +139,14 @@ class ArsenalPage(GhostPage):
     def _add_action_row(self, grid: QGridLayout, r: int, key, title, desc, button, icon_name) -> None:
         grid.addLayout(self._text(title, desc), r, 0)
         badge = QLabel()
-        run_btn = self._button(button, icon_name, lambda: self._execute([(key, None)]))
+        run_btn = self._button(button, icon_name, lambda: self._execute([(key, None)], button=run_btn))
+        if key == "purge":
+            run_btn.setToolTip(tech_tip("Purgar temporales", [arsenal.temp_dir(), r"%SystemRoot%\Temp"],
+                                        "Solo ficheros no bloqueados; los que estén en uso se omiten."))
+        else:
+            run_btn.setToolTip(tech_tip("Debloater (PowerShell)", [f"Get-AppxPackage -Name {n} | Remove-AppxPackage"
+                                                                   for n in arsenal.BLOATWARE],
+                                        "Solo para el usuario actual. Se reinstalan desde Microsoft Store."))
         grid.addWidget(badge, r, 1)
         grid.addWidget(run_btn, r, 2, 1, 2)
         self._rows[key] = {"badge": badge, "run": run_btn, "last": None}
@@ -178,6 +191,7 @@ class ArsenalPage(GhostPage):
                 self._badge(row["badge"], "✔ APLICADO" if on else "POR DEFECTO", COLORS["ok"] if on else COLORS["faint"])
             row["apply"].setEnabled(live and not on and not self._busy)
             row["revert"].setEnabled(live and (on or tweak.key in self._backed_up()) and not self._busy)
+            row["revert"].setToolTip(self._revert_tip(tweak))
         for key, *_rest in ACTIONS:
             row = self._rows[key]
             self._badge(row["badge"], row["last"] or ("LISTO" if arsenal.IS_WINDOWS else "SOLO WINDOWS"),
@@ -194,6 +208,27 @@ class ArsenalPage(GhostPage):
             self._badge(self._profile_badges[key], text, COLORS["ok"] if live and done else
                         COLORS["warn"] if live and count else COLORS["faint"])
             self._profile_btns[key].setEnabled(live and not self._busy)
+            self._profile_btns[key].setToolTip(self._profile_tip(key, card))
+
+    def _revert_tip(self, tweak) -> str:
+        if tweak.key in self._backed_up():
+            return tech_tip(f"Revertir · {tweak.title}", [f"{h}\\{s}\\{n or '(predeterminado)'} ← valor original"
+                                                         for h, s, n, _d in tweak.values],
+                            f"Desde el respaldo: {arsenal.STATE_FILE}")
+        lines = [f"Eliminar {h}\\{s}\\{n or '(predeterminado)'}" for h, s, n, _d in tweak.values]
+        lines += [f"Eliminar clave {h}\\{s}" for h, s in tweak.own_keys]
+        return tech_tip(f"Revertir · {tweak.title}", lines, "Sin respaldo de Lozarus: vuelve al comportamiento "
+                                                             "por defecto de Windows.")
+
+    def _profile_tip(self, key: str, card: str) -> str:
+        if key == "rollback":
+            return tech_tip("Revertir Todo (Rollback)", [arsenal.STATE_FILE],
+                            f"Restaura {len(self._backed_up())} respaldo(s) y borra el fichero al terminar.")
+        lines = [arsenal.describe(v) for t in arsenal.TWEAKS if t.card == card for v in t.values]
+        if key == "tech":
+            lines.append("Purgar %TEMP% y %SystemRoot%\\Temp")
+        return tech_tip(next(t for k, t, *_ in PROFILES if k == key), lines,
+                        "Solo se aplica lo que falta; los originales se guardan en rollback_state.json.")
 
     # --- Perfiles y ejecución -------------------------------------------------------------------
     def run_profile(self, key: str) -> None:
@@ -231,7 +266,7 @@ class ArsenalPage(GhostPage):
         how = "valor original del respaldo" if key in self._backed_up() else "borrar el valor (por defecto de Windows)"
         return f"• Revertir {tweak.title}: {how}"
 
-    def _execute(self, ops: List[Op], profile: Optional[str] = None) -> None:
+    def _execute(self, ops: List[Op], profile: Optional[str] = None, button: Optional[QPushButton] = None) -> None:
         """Elevación (HKLM), una confirmación con lo exacto que se aplicará y ejecución en segundo plano."""
         if self._busy or not ops:
             return
@@ -260,9 +295,9 @@ class ArsenalPage(GhostPage):
                                  danger=rollback or any(kind == "debloat" for kind, _ in ops)):
             return
         self._busy = True
-        busy_btn = self._profile_btns.get(next((k for k, t, *_ in PROFILES if t == profile), ""))
+        busy_btn = button or self._profile_btns.get(next((k for k, t, *_ in PROFILES if t == profile), ""))
         if busy_btn is not None:
-            set_busy(busy_btn, True, "Aplicando…")
+            set_busy(busy_btn, True, "Revirtiendo…" if rollback else "Aplicando…")
         self._render()
         self.app.log_tactical(f"Arsenal: {title} · {len(ops)} operación(es)")
         funcs = {"apply": lambda k: arsenal.apply(arsenal.BY_KEY[k]),
@@ -286,6 +321,8 @@ class ArsenalPage(GhostPage):
         if busy_btn is not None:
             set_busy(busy_btn, False)
         if not ok or not isinstance(res, tuple):
+            if busy_btn is not None:
+                flash_aura(busy_btn, COLORS["danger"])
             Toast.notify(self.app, "x", title, f"No se pudo completar: {res}", "fa5s.ghost")
             self._render()
             return
@@ -319,6 +356,8 @@ class ArsenalPage(GhostPage):
         failed = changes - good
         verb = "revertidos" if all(kind in ("revert", "finish_rollback") for kind, _ in ops) else "aplicados"
         head = f"{good} de {changes} cambios {verb}." if changes > 1 else ("Hecho." if good else "Falló.")
+        if busy_btn is not None:
+            flash_aura(busy_btn, COLORS["danger"] if not good else COLORS["warn"] if failed else COLORS["ok"])
         if changes:
             Toast.notify(self.app, "x" if not good else "!" if failed else "*", title,
                          " ".join([head] + notes[:2]), "fa5s.ghost")

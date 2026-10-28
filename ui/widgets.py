@@ -7,6 +7,7 @@ el hilo de trabajo (Worker), gráficos del Centro de Comando y utilidades compar
 
 from __future__ import annotations
 
+import html
 import math
 import random
 import socket
@@ -16,8 +17,9 @@ from contextlib import contextmanager
 from functools import lru_cache
 from typing import Any, Callable, Iterator, Optional, Sequence, Tuple
 
-from PySide6.QtCore import (Property, QEasingCurve, QEvent, QPoint, QPointF, QPropertyAnimation, QRect,
-                            QRectF, QSize, QThread, QTimer, Qt, Signal)
+from PySide6.QtCore import (Property, QAbstractAnimation, QEasingCurve, QEvent, QPoint, QPointF,
+                            QPropertyAnimation, QRect, QRectF, QSize, QThread, QTimer, Qt, QVariantAnimation,
+                            Signal)
 from PySide6.QtGui import (QBrush, QColor, QFont, QIcon, QImage, QPainter, QPainterPath, QPen, QPixmap,
                            QPolygonF, QRadialGradient)
 from PySide6.QtWidgets import (QAbstractItemView, QFrame, QGraphicsDropShadowEffect, QGraphicsScene,
@@ -82,6 +84,33 @@ def apply_aura(widget: QWidget) -> QGraphicsDropShadowEffect:
     effect = _aura_effect(widget)
     widget.setGraphicsEffect(effect)
     return effect
+
+
+def flash_aura(widget: QWidget, color: str, ms: int = 900) -> None:
+    """
+    Micro-interacción de éxito/fallo: el aura del botón se enciende del color dado y vuelve a su
+    blanco de reposo con una curva suave. Sin aura (botones de utilidad) no hace nada.
+    """
+    effect = widget.graphicsEffect()
+    if not isinstance(effect, QGraphicsDropShadowEffect) or not effect.isEnabled():
+        return
+    start = QColor(color)
+    start.setAlpha(235)
+    anim = QVariantAnimation(widget)
+    anim.setDuration(ms)
+    anim.setStartValue(start)
+    anim.setEndValue(QColor(255, 255, 255, round(255 * AURA_ALPHA)))
+    anim.setEasingCurve(QEasingCurve.Type.OutCubic)
+    anim.valueChanged.connect(effect.setColor)
+    anim.start(QAbstractAnimation.DeletionPolicy.DeleteWhenStopped)
+
+
+def tech_tip(title: str, lines: Sequence[str] = (), note: str = "") -> str:
+    """Tooltip técnico (texto enriquecido): título, rutas/comandos exactos en monoespaciada y una nota."""
+    mono = "".join(f"<br><span style='font-family:Consolas,\"Cascadia Mono\",monospace;"
+                   f"color:{COLORS['text2']};'>{html.escape(str(line))}</span>" for line in lines)
+    tail = f"<br><span style='color:{COLORS['muted']};'>{html.escape(note)}</span>" if note else ""
+    return f"<b>{html.escape(title)}</b>{mono}{tail}"
 
 
 def apply_button_auras(root: QWidget) -> None:
@@ -587,6 +616,79 @@ class Gauge(QWidget):
         font.setWeight(QFont.Weight.Bold)
         p.setFont(font)
         p.drawText(rect, Qt.AlignmentFlag.AlignCenter, f"{self._value:.0f}%")
+
+
+class ScoreRing(QWidget):
+    """
+    Puntuación de seguridad: anillo con la nota (0-100) en el centro y «/100» debajo. El valor se
+    anima hacia la nota nueva (sube «en tiempo real» al mitigar) y el color sigue al tramo.
+    """
+
+    def __init__(self, size: int = 150, thickness: int = 12):
+        super().__init__()
+        self.setFixedSize(size, size)
+        self._shown = 0.0
+        self._target: Optional[int] = None
+        self._thickness = thickness
+        self._anim = QPropertyAnimation(self, b"shown", self)
+        self._anim.setDuration(900)
+        self._anim.setEasingCurve(QEasingCurve.Type.OutCubic)
+
+    def _get_shown(self) -> float:
+        return self._shown
+
+    def _set_shown(self, value: float) -> None:
+        self._shown = value
+        self.update()
+
+    shown = Property(float, _get_shown, _set_shown)
+
+    def set_score(self, score: Optional[int]) -> None:
+        if score == self._target:
+            return
+        self._target = score
+        self._anim.stop()
+        if score is None:
+            self._set_shown(0.0)
+            return
+        self._anim.setStartValue(self._shown)
+        self._anim.setEndValue(float(score))
+        self._anim.start()
+
+    @staticmethod
+    def color_for(score: Optional[float]) -> str:
+        return COLORS["faint"] if score is None else (COLORS["ok"] if score >= 85 else COLORS["warn"]
+                                                      if score >= 60 else COLORS["danger"])
+
+    def paintEvent(self, event) -> None:
+        p = QPainter(self)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        m = self._thickness / 2 + 4
+        rect = QRectF(m, m, self.width() - 2 * m, self.height() - 2 * m)
+        track = QPen(QColor(COLORS["panel_alt"]))
+        track.setWidthF(self._thickness)
+        p.setPen(track)
+        p.drawArc(rect, 0, 360 * 16)
+        color = QColor(self.color_for(None if self._target is None else self._shown))
+        if self._target is not None and self._shown > 0:
+            arc = QPen(color)
+            arc.setWidthF(self._thickness)
+            arc.setCapStyle(Qt.PenCapStyle.RoundCap)
+            p.setPen(arc)
+            p.drawArc(rect, 90 * 16, -int(360 * 16 * self._shown / 100))
+        font = QFont(self.font())
+        font.setPointSize(30)
+        font.setWeight(QFont.Weight.Bold)
+        p.setFont(font)
+        p.setPen(QColor(COLORS["text"]) if self._target is not None else QColor(COLORS["faint"]))
+        top = QRectF(rect.x(), rect.y() - 8, rect.width(), rect.height())
+        p.drawText(top, Qt.AlignmentFlag.AlignCenter, "—" if self._target is None else f"{self._shown:.0f}")
+        small = QFont(self.font())
+        small.setPointSize(9)
+        p.setFont(small)
+        p.setPen(QColor(COLORS["muted"]))
+        p.drawText(QRectF(rect.x(), rect.center().y() + 18, rect.width(), 18), Qt.AlignmentFlag.AlignHCenter,
+                   "/ 100")
 
 
 class BentoCard(QFrame):

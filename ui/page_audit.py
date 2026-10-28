@@ -26,10 +26,11 @@ from modulos._inicio import RUN_KEYS
 from modulos._utilidades import run_cmd
 
 from ui.theme import COLORS, SEVERITY_COLORS, SEVERITY_ORDER, badge_qss
-from ui.widgets import (BentoCard, Page, _emit_event, frozen, icon, make_card, make_table, repolish,
-                        set_busy, stat_chip, with_icon)
+from ui.widgets import (BentoCard, Page, _emit_event, flash_aura, frozen, icon, make_card, make_table,
+                        repolish, set_busy, stat_chip, tech_tip, with_icon)
 from ui.chrome import Toast
 from ui.dialogs import ConfirmDialog
+from ui.informe import REPORTS_DIR, export_report
 from ui.page_monitor import PROTECTED_PROCS, _control_process, _same_process
 
 if TYPE_CHECKING:  # solo para las anotaciones; en ejecución evita el import circular
@@ -313,7 +314,16 @@ class AuditPage(Page):
         self.fix_btn.clicked.connect(self.mitigate_all)
         self._fixed = {}  # id(Finding) -> cómo se mitigó
         self._fixing = False
+        self._fix_button = self.fix_btn  # botón que lanzó la última mitigación (destello al terminar)
         actions.addStretch(1)
+        self.report_btn = QPushButton("Exportar Informe")
+        self.report_btn.setObjectName("Ghost")
+        self.report_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        with_icon(self.report_btn, "fa5s.file-export", COLORS["muted"])
+        self.report_btn.setToolTip(tech_tip("Informe de auditoría técnica (HTML)", [REPORTS_DIR],
+                                            "Puntuación, vectores mitigados, riesgos pendientes, Arsenal y puertos."))
+        self.report_btn.clicked.connect(lambda: export_report(self.app))
+        actions.addWidget(self.report_btn)
         lay.addLayout(actions)
         self.status = QLabel("Listo para analizar")
         self.status.setObjectName("StatusMuted")
@@ -430,10 +440,13 @@ class AuditPage(Page):
         known = self._port_rows is not None or self.findings or self.last_result is not None
         self._set_badge(self._fix_badge, risks if known else None,
                         COLORS["danger"] if counts["critical"] else COLORS["warn"] if risks else COLORS["faint"])
-        pending = len(self._pending_fixes())
+        pending = self._pending_fixes()
         self.fix_btn.setEnabled(bool(pending) and not self._fixing)
-        self.fix_btn.setToolTip(f"{pending} mitigaciones automáticas disponibles" if pending
-                                else "No hay riesgos WARNING / CRITICAL con remediación automática.")
+        actions = list({spec["group"]: spec["what"] for _, spec in pending}.values())
+        self.fix_btn.setToolTip(tech_tip(f"Mitigar {len(pending)} riesgo(s) · {len(actions)} acción(es)",
+                                         actions[:10] + (["…"] if len(actions) > 10 else []),
+                                         "Una sola confirmación; las acciones idénticas se ejecutan una vez.")
+                                if pending else "No hay riesgos WARNING / CRITICAL con remediación automática.")
 
     def _set_filter(self, key: str) -> None:
         self._filter = key
@@ -676,7 +689,12 @@ class AuditPage(Page):
         self.block_btn.setEnabled(not done and not self._fixing)
         killable = row["pid"] is not None and not self._protected(row)
         self.kill_btn.setEnabled(killable and not done)
-        self.kill_btn.setToolTip("" if killable else "Proceso protegido del sistema o PID desconocido.")
+        self.kill_btn.setToolTip(tech_tip("Finalizar proceso propietario",
+                                          [f"psutil.Process({row['pid']}).terminate()  # {row['process']}"],
+                                          "Pide confirmación; no se puede deshacer.") if killable
+                                 else "Proceso protegido del sistema o PID desconocido.")
+        self.block_btn.setToolTip(tech_tip("Bloquear en el Firewall de Windows", [self._port_fix(row)["what"]],
+                                           "Regla de entrada; requiere Administrador."))
 
     @staticmethod
     def _port_fix(row: dict) -> dict:
@@ -691,7 +709,7 @@ class AuditPage(Page):
     def _block_port(self) -> None:
         row = self._selected_port()
         if row is not None and not row.get("mitigated"):
-            self._run_fixes([(row, self._port_fix(row))])
+            self._run_fixes([(row, self._port_fix(row))], self.block_btn)
 
     def _pending_fixes(self) -> list:
         """(objetivo, acción) pendientes: puertos de riesgo expuestos y hallazgos con endurecimiento."""
@@ -706,7 +724,7 @@ class AuditPage(Page):
     def mitigate_all(self) -> None:
         self._run_fixes(self._pending_fixes())
 
-    def _run_fixes(self, targets: list) -> None:
+    def _run_fixes(self, targets: list, button: Optional[QPushButton] = None) -> None:
         """Elevación, una única confirmación, copias de seguridad y ejecución en segundo plano."""
         if not targets or self._fixing:
             return
@@ -746,6 +764,7 @@ class AuditPage(Page):
             if "error" in spec["saved"]:
                 del jobs[group]  # sin copia de seguridad no se borra
         self._fixing = True
+        self._fix_button = button or self.fix_btn
         self.app.log_tactical(f"Mitigación: aplicando {len(jobs)} acciones")
         set_busy(self.fix_btn, True, "Mitigando…")
         self._update_counters()
@@ -793,6 +812,7 @@ class AuditPage(Page):
             text = targets[0][1]["how"].capitalize() + "." if done else failed[0]
         else:
             text = f"{done} de {len(targets)} riesgos mitigados." + (f" Fallos: {failed[0]}" if failed else "")
+        flash_aura(self._fix_button, COLORS["ok"] if not failed else COLORS["warn"] if done else COLORS["danger"])
         Toast.notify(self.app, "*" if not failed else "!" if done else "x", "Mitigación", text, "fa5s.magic")
         self._rescore()
         self._update_counters()
@@ -955,6 +975,10 @@ class AuditPage(Page):
             self.harden_btn.setText(spec["label"])
             with_icon(self.harden_btn, spec["icon"], COLORS["danger"])
             self.harden_btn.setEnabled(not fixed and not self._fixing)
+            self.harden_btn.setToolTip(tech_tip(spec["label"], [spec["what"]], "Requiere Administrador; pide "
+                                                "confirmación antes de aplicar.") if "what" in spec else
+                                       tech_tip(spec["label"], ["UAC · ShellExecute runas"],
+                                                "Relanza Lozarus elevado y cierra esta instancia."))
         self.harden_note.setText("Ya se ejecuta como Administrador: repite el diagnóstico." if admin_ok else
                                  f"Se aplicará: {spec['what']}" if spec and "what" in spec else
                                  "" if spec else "Sin remediación automática: sigue la recomendación.")
@@ -967,7 +991,7 @@ class AuditPage(Page):
         if spec["kind"] == "admin":
             self.app.relaunch_as_admin()
         else:
-            self._run_fixes([(f, spec)])
+            self._run_fixes([(f, spec)], self.harden_btn)
 
     # --- Utilidades rápidas --------------------------------------------------------------------
     def install_dependencies(self) -> None:
