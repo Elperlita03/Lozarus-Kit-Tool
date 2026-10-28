@@ -64,7 +64,7 @@ from ui._compat import (HAS_BLACKBOX, HAS_HONEYPOT, CajaNegra, EventBus, Honeypo
 from ui.theme import APP_NAME, COLORS, GLASS, NAV_ICONS, QSS, base_font  # noqa: E402
 from ui.widgets import _ORPHAN_WORKERS, Worker, icon, with_icon  # noqa: E402
 from ui.dialogs import ConfirmDialog, ResetConfirmDialog  # noqa: E402
-from ui.chrome import AlertCenter, ConsolePanel, EdgeResizer, TitleBar, Toast  # noqa: E402
+from ui.chrome import AlertCenter, ConsolePanel, EdgeResizer, TitleBar, Toast, app_icon  # noqa: E402
 from ui.page_command import CommandPage  # noqa: E402
 from ui.page_monitor import MonitorPage, ProcessMonitor  # noqa: E402
 from ui.page_audit import AuditPage  # noqa: E402
@@ -867,8 +867,22 @@ class MainWindow(QMainWindow):
                   file=sys.stderr)
 
 
+def _set_windows_app_id() -> None:
+    """
+    Windows agrupa la ventana en la barra de tareas bajo su PROPIO ID (con el icono de Lozarus) en
+    lugar de hacerlo bajo python.exe. Fuera de Windows ctypes.windll no existe: no hace nada.
+    """
+    try:
+        import ctypes
+        ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID("lozarus.kit.tool.1")
+    except (ImportError, AttributeError, OSError):
+        pass
+
+
 def main() -> None:
+    _set_windows_app_id()  # antes de crear la QApplication (y su primera ventana)
     app = QApplication(sys.argv)
+    app.setWindowIcon(app_icon())
     app.setFont(base_font())  # tipografía corporativa (el QSS solo ajusta jerarquías)
     app.setStyleSheet(QSS)
     win = MainWindow()

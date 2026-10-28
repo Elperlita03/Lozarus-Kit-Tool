@@ -14,12 +14,12 @@ from collections import deque
 from typing import Optional
 
 from PySide6.QtCore import QEvent, QObject, QPointF, QRect, QRectF, QSize, QTimer, Qt
-from PySide6.QtGui import QColor, QFont, QGuiApplication, QLinearGradient, QPainter, QPixmap
+from PySide6.QtGui import QColor, QFont, QGuiApplication, QIcon, QLinearGradient, QPainter, QPixmap
 from PySide6.QtWidgets import (QFrame, QHBoxLayout, QLabel, QMainWindow, QPlainTextEdit,
                                QPushButton, QScrollArea, QVBoxLayout, QWidget)
 
 from ui._compat import HAS_QTA, qta
-from ui.theme import COLORS, GLASS, LOGO_PATH
+from ui.theme import COLORS, GLASS, ICON_PATH, LOGO_PATH
 from ui.widgets import apply_aura, icon, with_icon
 
 
@@ -57,6 +57,24 @@ def _cosmic_icon(name: str, size: int) -> Optional[QPixmap]:
     p.fillRect(area, grad)
     p.end()
     return out
+
+
+def app_icon() -> QIcon:
+    """
+    Icono de la ventana y de la barra de tareas: assets/logo.png si existe; si no, el .ico de la
+    marca; y si tampoco, el meteorito de la cabecera en varios tamaños (16-256 px).
+    """
+    for path in (LOGO_PATH, ICON_PATH):
+        if os.path.isfile(path):
+            candidate = QIcon(path)
+            if not candidate.isNull():
+                return candidate
+    fallback = QIcon()
+    for size in (16, 24, 32, 48, 64, 128, 256):
+        pix = _cosmic_icon("fa5s.meteor", size)
+        if pix is not None:
+            fallback.addPixmap(pix)
+    return fallback
 
 
 class TitleBar(QFrame):

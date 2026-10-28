@@ -322,8 +322,11 @@ for _token, _name, _svg in (
          _switch_svg(False, COLORS["panel"], COLORS["border"], COLORS["disabled"]))):
     QSS = QSS.replace(_token, _ui_asset(_name, _svg))
 
-# Logo opcional de la barra de título (si no existe, chrome.TitleBar usa un icono de qtawesome).
-LOGO_PATH = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "assets", "logo.png")
+# Logo opcional de la barra de título (si no existe, chrome.TitleBar usa un icono de qtawesome) e
+# icono de marca .ico (el mismo de las notificaciones): ambos sirven de icono de la ventana.
+ASSETS_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "assets")
+LOGO_PATH = os.path.join(ASSETS_DIR, "logo.png")
+ICON_PATH = os.path.join(ASSETS_DIR, "lozarus.ico")
 
 
 # Iconos vectoriales (qtawesome). Si no está instalado, se devuelven iconos vacíos y la app sigue.
