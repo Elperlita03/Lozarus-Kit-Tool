@@ -287,7 +287,8 @@ class Toast(QFrame):
     Aviso in-app no intrusivo: una tarjeta que aparece abajo a la derecha, se apila con las demás,
     se auto-descarta a los ~7 s y ofrece acciones rápidas (Ir al módulo / Confiar / Descartar). No
     bloquea nada: el evento ya está en la consola y en la Caja Negra; esto es solo un recordatorio.
-    `entry` admite `title` e `icon` opcionales (por defecto, «Alerta de seguridad»).
+    `entry` admite `title` e `icon` opcionales (por defecto, «Alerta de seguridad»), `actions`
+    ([(texto, función)]: botones propios, p. ej. «Bloquear») y `life_ms` (duración en pantalla).
     """
     KIND_COLOR = {"!": COLORS["warn"], "x": COLORS["danger"], "*": COLORS["ok"], "~": COLORS["accent"],
                   "+": COLORS["accent"]}
@@ -339,6 +340,12 @@ class Toast(QFrame):
             trust.setObjectName("Mini")
             trust.clicked.connect(lambda: (win.trust_process(entry["process"]), self.dismiss()))
             actions.addWidget(trust)
+        for text, callback in entry.get("actions") or ():
+            act = QPushButton(text)
+            act.setObjectName("Mini")
+            act.setCursor(Qt.CursorShape.PointingHandCursor)
+            act.clicked.connect(lambda _=False, cb=callback: (self.dismiss(), cb()))
+            actions.addWidget(act)
         actions.addStretch(1)
         dismiss = QPushButton("Descartar")
         dismiss.setObjectName("Mini")
@@ -363,7 +370,7 @@ class Toast(QFrame):
         self._reflow()
         self.show()
         self.raise_()
-        self._life.start(self.LIFE_MS)
+        self._life.start(self.entry.get("life_ms") or self.LIFE_MS)
 
     def dismiss(self) -> None:
         if self in Toast._active:

@@ -228,6 +228,58 @@ def revert(tweak: Tweak) -> dict:
     return {"tweak": tweak.key, "restored": backup or "valores por defecto de Windows"}
 
 
+# --- Gestor visual de rollback (restauración quirúrgica) ---------------------------------------
+def rollback_entries() -> List[dict]:
+    """Cada valor respaldado en rollback_state.json con su original y el valor ACTUAL de Windows."""
+    rows = []
+    for key, backup in sorted(load_state().items()):
+        tweak = BY_KEY.get(key)
+        for item in backup.get("values", []):
+            exists, data, kind = read_value(item["hive"], item["subkey"], item["name"])
+            rows.append({"tweak": key, "title": tweak.title if tweak else key, "hive": item["hive"],
+                         "subkey": item["subkey"], "name": item["name"], "orig_exists": item["exists"],
+                         "orig_data": item["data"], "orig_type": item["type"], "cur_exists": exists,
+                         "cur_data": data, "cur_type": kind, "admin": item["hive"] == "HKLM",
+                         "matches": (exists, data if exists else None)
+                         == (item["exists"], item["data"] if item["exists"] else None)})
+    return rows
+
+
+def restore_value(tweak_key: str, hive: str, subkey: str, name: str) -> dict:
+    """
+    Restaura UN valor a su original del respaldo (lo reescribe, o lo borra si no existía) y lo quita
+    del JSON. Si era el último valor de ese ajuste, borra también las claves que Lozarus creó y la
+    entrada del ajuste; sin respaldos pendientes, el fichero desaparece (save_state).
+    """
+    state = load_state()
+    backup = state.get(tweak_key)
+    item = next((i for i in (backup or {}).get("values", [])
+                 if (i["hive"], i["subkey"], i["name"]) == (hive, subkey, name)), None)
+    if item is None:
+        raise KeyError(f"{hive}\\{subkey}\\{name} no está en rollback_state.json")
+    before = read_value(hive, subkey, name)
+    if item["exists"]:
+        write_value(hive, subkey, name, item["data"], item["type"])
+    else:
+        delete_value(hive, subkey, name)
+    backup["values"].remove(item)
+    dropped_keys = []
+    if not backup["values"]:
+        wr = _winreg()
+        for h, sk in backup.get("created_keys", []):
+            try:
+                wr.DeleteKey(_root(h), sk)
+                dropped_keys.append(f"{h}\\{sk}")
+            except OSError:
+                pass  # no vacía o ya no existe: se deja
+        del state[tweak_key]
+    save_state(state)
+    return {"tweak": tweak_key, "registry": f"{hive}\\{subkey}", "value": name or "(predeterminado)",
+            "before": {"exists": before[0], "data": before[1]}, "restored": {"exists": item["exists"],
+                                                                                 "data": item["data"]},
+            "keys_deleted": dropped_keys, "tweak_done": tweak_key not in state}
+
+
 # --- Acciones sin estado ------------------------------------------------------------------------
 def purge_temp() -> dict:
     """Ficheros no bloqueados de %TEMP% y C:\\Windows\\Temp (los que estén en uso se omiten)."""
@@ -282,4 +334,5 @@ def restart_explorer() -> dict:
 
 
 __all__ = ["IS_WINDOWS", "TWEAKS", "BY_KEY", "BLOATWARE", "STATE_FILE", "Tweak", "apply", "revert",
-           "snapshot", "load_state", "describe", "purge_temp", "debloat", "finish_rollback", "restart_explorer"]
+           "snapshot", "load_state", "describe", "purge_temp", "debloat", "finish_rollback", "restart_explorer",
+           "rollback_entries", "restore_value"]

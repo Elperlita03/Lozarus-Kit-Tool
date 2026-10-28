@@ -71,6 +71,7 @@ from ui.page_audit import AuditPage  # noqa: E402
 from ui.page_network import NetworkPage  # noqa: E402
 from ui.page_honeypot import HoneypotPage  # noqa: E402
 from ui.page_arsenal import ArsenalPage  # noqa: E402
+from ui.page_guard import GuardPage  # noqa: E402
 from ui.page_history import HistorialPage  # noqa: E402
 
 __all__ = ["MainWindow", "NavButton", "HoldButton", "ProcessMonitor", "main"]  # ProcessMonitor: pruebas
@@ -230,11 +231,11 @@ class MainWindow(QMainWindow):
     NAV = [("comando", "Centro de Comando"), ("monitor", "Monitor en Vivo"),
            ("auditoria", "Escaneo de Vectores"), ("historial", "Historial"),
            ("red", "Endurecimiento de Red"), ("honeypot", "Honeypot"),
-           ("arsenal", "Arsenal & Modo Fantasma")]
+           ("arsenal", "Arsenal & Modo Fantasma"), ("guardia", "Guardia & Rollback")]
 
     NAV_SECTORS = [
         ("CENTRO DE CONTROL", ["comando", "monitor"]),
-        ("SISTEMA Y PERÍMETRO", ["auditoria", "red", "arsenal"]),
+        ("SISTEMA Y PERÍMETRO", ["auditoria", "red", "arsenal", "guardia"]),
         ("LABORATORIO Y REGISTRO", ["honeypot", "historial"]),
     ]
 
@@ -316,7 +317,7 @@ class MainWindow(QMainWindow):
         self.pages = {"comando": CommandPage(self), "monitor": MonitorPage(self),
                       "auditoria": AuditPage(self), "historial": HistorialPage(self),
                       "red": NetworkPage(self), "honeypot": HoneypotPage(self),
-                      "arsenal": ArsenalPage(self)}
+                      "arsenal": ArsenalPage(self), "guardia": GuardPage(self)}
         for page in self.pages.values():
             self.stack.addWidget(page)
         body.addWidget(self.stack, 1)
@@ -782,10 +783,11 @@ class MainWindow(QMainWindow):
 
     # --- Centro de alertas y avisos in-app (se completan en el bloque de alertas) ----------
     def record_alert(self, kind: str, text: str, module: Optional[str] = None,
-                     process: Optional[str] = None) -> None:
-        """Registra una alerta de la sesión, actualiza el contador de la campana y lanza un toast."""
+                     process: Optional[str] = None, **extra) -> None:
+        """Registra una alerta de la sesión, actualiza el contador de la campana y lanza un toast.
+        `extra` pasa al toast: title, icon, actions [(texto, función)] y life_ms."""
         entry = {"when": dt.datetime.now(), "kind": kind, "text": text,
-                 "module": module, "process": process}
+                 "module": module, "process": process, **extra}
         self.alerts_log.append(entry)
         if getattr(self, "titlebar", None) is not None:
             self.titlebar.set_alert_count(len(self.alerts_log))
