@@ -35,7 +35,8 @@ class HistorialPage(Page):
     """
 
     SOURCES = [("todas", "Todas las fuentes"), ("honeypot", "Honeypot"), ("privacy", "Privacidad"),
-               ("network", "Red"), ("monitor", "Monitor"), ("forensics", "Forense"), ("otros", "Otros")]
+               ("network", "Red"), ("monitor", "Monitor"), ("forensics", "Forense"),
+               ("system", "Sistema (almacenamiento y salud)"), ("otros", "Otros")]
 
     def __init__(self, app: "MainWindow"):
         super().__init__("Historial y Laboratorio Forense",

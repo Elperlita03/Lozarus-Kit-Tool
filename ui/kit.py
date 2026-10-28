@@ -8,14 +8,19 @@ Perímetro, Optimización de Red y Procesos, Arsenal & Modo Fantasma):
   · Inspector     tarjeta de doble columna: inteligencia defensiva | acción directa.
   · SafeActions   privilegios con salto a UAC → confirmación con lo exacto → segundo plano con spinner →
                   cierre trazable (destello del botón, aviso flotante y evento en la Caja Negra).
+  · TaskProgress / ProgressStrip  progreso y cancelación de las tareas largas (sfc, DISM, defrag).
 """
 
 from __future__ import annotations
 
+import threading
+import time
 from typing import Any, Callable, List, Optional, Sequence, Tuple
 
-from PySide6.QtCore import Qt
-from PySide6.QtWidgets import QFrame, QHBoxLayout, QLabel, QPushButton, QVBoxLayout, QWidget
+from PySide6.QtCore import QTimer, Qt
+from PySide6.QtWidgets import QFrame, QHBoxLayout, QLabel, QProgressBar, QPushButton, QVBoxLayout, QWidget
+
+from modulos._salud_sistema import format_duration
 
 from ui.theme import COLORS, badge_qss
 from ui.widgets import _emit_event, flash_aura, icon, set_busy, with_icon
@@ -300,3 +305,86 @@ class SafeActions:
 
     def _busy_changed(self) -> None:
         """Gancho: la página repinta su estado global (EN CURSO · n)."""
+
+
+class TaskProgress:
+    """
+    Progreso de una tarea larga compartido con su hilo de trabajo: el hilo escribe `pct` (una asignación,
+    atómica para el intérprete) y la interfaz lo lee con un temporizador; `cancel` (threading.Event)
+    detiene la herramienta. Sin señales nuevas: la tarea sigue yendo por app.run_task.
+    """
+
+    def __init__(self) -> None:
+        self.pct: Optional[float] = None
+        self.cancel = threading.Event()
+        self.started = time.monotonic()
+
+    def set(self, pct: float) -> None:
+        self.pct = pct
+
+
+class ProgressStrip(QWidget):
+    """Barra de progreso, texto y «Cancelar» de una tarea larga. Oculta en reposo; mientras hay tarea lee
+    su TaskProgress cada 400 ms (el temporizador solo corre entonces)."""
+
+    def __init__(self):
+        super().__init__()
+        lay = QHBoxLayout(self)
+        lay.setContentsMargins(0, 2, 0, 2)
+        lay.setSpacing(10)
+        self.bar = QProgressBar()
+        self.bar.setRange(0, 100)
+        self.bar.setTextVisible(False)
+        self.label = QLabel("")
+        self.label.setObjectName("Tiny")
+        self.cancel_btn = action_button("Cancelar", "fa5s.stop-circle", "Mini", self.cancel, 12)
+        lay.addWidget(self.bar, 1)
+        lay.addWidget(self.label)
+        lay.addWidget(self.cancel_btn)
+        self._task: Optional[TaskProgress] = None
+        self._what = ""
+        self._timer = QTimer(self)
+        self._timer.setInterval(400)
+        self._timer.timeout.connect(self.tick)
+        self.setVisible(False)
+
+    @property
+    def active(self) -> bool:
+        return self._task is not None
+
+    def start(self, task: TaskProgress, what: str) -> None:
+        self._task, self._what = task, what
+        self.bar.setRange(0, 0)  # indeterminada hasta que la herramienta imprima su primer porcentaje
+        self.cancel_btn.setEnabled(True)
+        self.setVisible(True)
+        self._timer.start()
+        self.tick()
+
+    def tick(self) -> None:
+        task = self._task
+        if task is None:
+            return
+        elapsed = format_duration(time.monotonic() - task.started)
+        if task.pct is not None:
+            if self.bar.maximum() == 0:
+                self.bar.setRange(0, 100)
+            self.bar.setValue(int(task.pct))
+            text = f"{self._what} · {task.pct:.0f} % · {elapsed}"
+        else:
+            text = f"{self._what} · {elapsed}"
+        if task.cancel.is_set():
+            text += " · cancelando…"
+        if text != self.label.text():
+            self.label.setText(text)
+
+    def stop(self) -> None:
+        self._timer.stop()
+        self._task = None
+        self.setVisible(False)
+
+    def cancel(self) -> None:
+        """Pide a la herramienta en curso que se detenga (el resultado llega por la tarea, como siempre)."""
+        if self._task is not None:
+            self._task.cancel.set()
+            self.cancel_btn.setEnabled(False)
+            self.tick()

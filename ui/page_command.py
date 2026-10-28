@@ -26,6 +26,8 @@ from modulos._endurecimiento_red import flush_dns
 from modulos._privacidad import clean_temp, empty_working_sets
 from modulos._forense import list_snapshots
 from modulos._obsidian import events_per_minute, health_score, jsonl_size_kb, process_vitals
+from modulos._rendimiento_disco import human_bytes, system_volume
+from modulos._salud_sistema import integrity_status, load_state as load_health_state
 from modulos._tacticas import sandbox_available
 from modulos._puntuacion import LABELS, WEIGHTS
 from modulos._utilidades import HAS_PSUTIL, _powershell_exe, is_admin
@@ -52,7 +54,10 @@ COMPONENT_PAGE = {
     "Persistencia Táctica": "honeypot", "Caja Negra": "historial", "Endurecimiento de Red": "red",
     "Modo Fantasma (herramientas)": "arsenal", "Laboratorio Forense": "historial",
     "Núcleo de eventos (bus)": "historial", "OBSIDIAN (salud de telemetría)": "comando",
+    "Almacenamiento": "almacenamiento", "Integridad del sistema": "salud",
 }
+# Nivel de los módulos de Rendimiento y Salud -> estado del panel de componentes
+LEVEL_STATE = {"ok": ST_OK, "warn": ST_DEGRADED, "critical": ST_ALERT, "unknown": ST_STOPPED}
 
 
 class ComponentCard(QFrame):
@@ -264,6 +269,39 @@ def collect_component_status(modules, plugin_errors, bus=None, blackbox=None,
         snaps = 0
     rows.append(("Laboratorio Forense", ST_OK,
                  f"{snaps} snapshot(s) en disco · visor de la Caja Negra y mesa de autopsias"))
+
+    # Almacenamiento: uso REAL del disco del sistema (psutil) + lo liberable del último análisis de la sesión.
+    try:
+        vol = system_volume()
+    except Exception:  # noqa: BLE001
+        vol = None
+    if vol is None:
+        rows.append(("Almacenamiento", ST_STOPPED, "no se pudo leer el disco del sistema"))
+    else:
+        detail = f"{vol['mount']} al {vol['percent']:.0f} % · {human_bytes(vol['free'])} libres"
+        if live.get("storage_reclaimable") is not None:
+            detail += f" · {human_bytes(live['storage_reclaimable'])} liberables"
+        rows.append(("Almacenamiento", LEVEL_STATE[vol["level"]], detail))
+
+    # Integridad del sistema: veredicto de la página Salud (si ya leyó las señales) o, si no, el último
+    # resultado de SFC/DISM guardado en el historial. Sin verificaciones recientes: SIN VERIFICAR (no «sano»).
+    verdict = live.get("health_verdict")
+    if verdict is not None:
+        worst = next((t for lvl, t in verdict["reasons"] if lvl in ("warn", "critical")), "")
+        rows.append(("Integridad del sistema", LEVEL_STATE[verdict["level"]],
+                     verdict["label"].lower() + (f" · {worst}" if worst else "")))
+    else:
+        try:
+            integ = integrity_status(load_health_state())
+        except Exception:  # noqa: BLE001
+            integ = {"files": None, "store": None, "verified": False}
+        known = [r for r in (integ["files"], integ["store"]) if r]
+        if not integ["verified"]:
+            rows.append(("Integridad del sistema", ST_STOPPED, "sin verificar en los últimos 30 días (SFC / DISM)"))
+        else:
+            worst = max(known, key=lambda r: {"ok": 0, "warn": 1, "critical": 2}.get(r["level"], 0))
+            rows.append(("Integridad del sistema", LEVEL_STATE.get(worst["level"], ST_STOPPED),
+                         " · ".join(f"{'SFC' if r['tool'] == 'sfc' else 'DISM'}: {r['label'].lower()}" for r in known)))
 
     # OBSIDIAN: salud de la PROPIA telemetría (ritmo del bus, tamaño del JSONL, CPU/RAM/hilos de Lozarus).
     obs = live.get("obsidian")
@@ -588,6 +626,12 @@ class CommandPage(Page):
         audit = pages.get("auditoria")
         if audit is not None and getattr(audit, "last_result", None) is not None:
             live["last_audit"] = audit.last_result
+        storage = pages.get("almacenamiento")
+        if storage is not None and hasattr(storage, "reclaimable"):
+            live["storage_reclaimable"] = storage.reclaimable()
+        health_page = pages.get("salud")
+        if health_page is not None and getattr(health_page, "_signals", None) is not None:
+            live["health_verdict"] = health_page.verdict()
         # OBSIDIAN: salud de la propia telemetría (CPU/RAM/hilos del proceso, ritmo del bus, tamaño JSONL)
         obs = {"vitals": process_vitals()}
         bb = getattr(self.app, "blackbox", None)

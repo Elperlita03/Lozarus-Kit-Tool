@@ -244,6 +244,12 @@ QTableWidget { background-color: transparent; alternate-background-color: rgba(2
     selection-background-color: ${tint_hi}; }
 QTableWidget::item { padding: 0 8px; border: none; }
 QTableWidget::item:selected { background-color: ${tint_hi}; color: #FFFFFF; }
+/* Casillas dentro de las tablas (p. ej. categorías de limpieza): contorno visible sobre el negro */
+QTableView::indicator { width: 14px; height: 14px; border: 1px solid ${line}; border-radius: 4px;
+    background: transparent; }
+QTableView::indicator:hover { border-color: ${accent}; }
+QTableView::indicator:checked { background: ${accent}; border-color: ${accent}; image: url("__CHECK__"); }
+QTableView::indicator:disabled { border-color: ${border}; background: transparent; }
 QHeaderView { background-color: transparent; border: none; }
 QHeaderView::section { background-color: rgba(255, 255, 255, 0.04); color: ${text2}; border: none;
     border-bottom: 1px solid ${border}; padding: 8px 8px; font-size: 9pt; font-weight: 700; letter-spacing: 0.8px;
@@ -331,7 +337,11 @@ for _token, _name, _svg in (
          _switch_svg(False, COLORS["card"], COLORS["accent"], COLORS["text2"])),
         ("__SWITCH_ON__", "switch-on.svg", _switch_svg(True, "", COLORS["accent"], COLORS["bg"])),
         ("__SWITCH_DISABLED__", "switch-disabled.svg",
-         _switch_svg(False, COLORS["panel"], COLORS["border"], COLORS["disabled"]))):
+         _switch_svg(False, COLORS["panel"], COLORS["border"], COLORS["disabled"])),
+        ("__CHECK__", "check.svg",
+         '<svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 14 14">'
+         f'<path d="M3.2 7.3 L5.9 9.9 L10.8 4.4" fill="none" stroke="{COLORS["bg"]}" stroke-width="2" '
+         'stroke-linecap="round" stroke-linejoin="round"/></svg>')):
     QSS = QSS.replace(_token, _ui_asset(_name, _svg))
 
 # Logo opcional de la barra de título (si no existe, chrome.TitleBar usa un icono de qtawesome) e
@@ -346,6 +356,7 @@ NAV_ICONS = {
     "comando": "fa5s.tachometer-alt", "monitor": "fa5s.wave-square", "auditoria": "fa5s.shield-alt",
     "historial": "fa5s.history", "red": "fa5s.network-wired", "honeypot": "fa5s.eye",
     "arsenal": "fa5s.user-secret", "guardia": "fa5s.user-shield", "optimizacion": "fa5s.tools",
+    "almacenamiento": "fa5s.hdd", "salud": "fa5s.heartbeat",
 }
 
 

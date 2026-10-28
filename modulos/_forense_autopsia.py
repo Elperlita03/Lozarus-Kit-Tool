@@ -29,7 +29,8 @@ MAX_SCAN = 24 * 1024 * 1024              # bytes leídos para entropía/strings/
 # =============================================================================================
 # Prefijo de `source` -> categoría legible para el filtro del visor.
 _CATEGORIAS = (("honeypot", "honeypot"), ("monitor", "monitor"), ("red", "network"),
-               ("fantasma", "privacy"), ("forensics", "forensics"), ("forense", "forensics"))
+               ("fantasma", "privacy"), ("forensics", "forensics"), ("forense", "forensics"),
+               ("almacenamiento", "system"), ("salud", "system"))
 
 
 def event_category(ev):

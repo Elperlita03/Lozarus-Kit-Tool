@@ -45,7 +45,7 @@ from PySide6.QtCore import (Property, QEasingCurve, QPropertyAnimation, QSize, Q
                             Qt, Signal)
 from PySide6.QtGui import QColor, QPainter  # noqa: E402
 from PySide6.QtWidgets import (QApplication, QDialog, QFrame, QGraphicsOpacityEffect, QHBoxLayout,  # noqa: E402
-                               QLabel, QMainWindow, QPushButton, QSizeGrip, QSplitter,
+                               QLabel, QMainWindow, QPushButton, QScrollArea, QSizeGrip, QSplitter,
                                QStackedWidget, QVBoxLayout, QWidget)
 
 from modulos._alertas import HAS_PLYER, Sentinel, describe_threats, notify  # noqa: E402
@@ -74,6 +74,8 @@ from ui.page_arsenal import ArsenalPage  # noqa: E402
 from ui.page_guard import GuardPage  # noqa: E402
 from ui.page_history import HistorialPage  # noqa: E402
 from ui.page_optimizacion_red import OptimizacionRedPage  # noqa: E402
+from ui.page_almacenamiento import StoragePage  # noqa: E402
+from ui.page_salud import HealthPage  # noqa: E402
 
 __all__ = ["MainWindow", "NavButton", "HoldButton", "ProcessMonitor", "main"]  # ProcessMonitor: pruebas
 
@@ -233,11 +235,13 @@ class MainWindow(QMainWindow):
            ("auditoria", "Escaneo de Vectores"), ("historial", "Historial"),
            ("red", "Endurecimiento de Red"), ("honeypot", "Honeypot"),
            ("arsenal", "Arsenal & Modo Fantasma"), ("guardia", "Guardia & Rollback"),
-           ("optimizacion", "Optimización de Red y Procesos")]
+           ("optimizacion", "Optimización de Red y Procesos"), ("almacenamiento", "Almacenamiento y Rendimiento"),
+           ("salud", "Salud del Sistema")]
 
     NAV_SECTORS = [
         ("CENTRO DE CONTROL", ["comando", "monitor"]),
         ("SISTEMA Y PERÍMETRO", ["auditoria", "red", "optimizacion", "arsenal", "guardia"]),
+        ("RENDIMIENTO Y SALUD", ["salud", "almacenamiento"]),
         ("LABORATORIO Y REGISTRO", ["honeypot", "historial"]),
     ]
 
@@ -320,7 +324,8 @@ class MainWindow(QMainWindow):
                       "auditoria": AuditPage(self), "historial": HistorialPage(self),
                       "red": NetworkPage(self), "honeypot": HoneypotPage(self),
                       "arsenal": ArsenalPage(self), "guardia": GuardPage(self),
-                      "optimizacion": OptimizacionRedPage(self)}
+                      "optimizacion": OptimizacionRedPage(self), "almacenamiento": StoragePage(self),
+                      "salud": HealthPage(self)}
         for page in self.pages.values():
             self.stack.addWidget(page)
         body.addWidget(self.stack, 1)
@@ -397,6 +402,13 @@ class MainWindow(QMainWindow):
         lay = QVBoxLayout(side)
         lay.setContentsMargins(14, 16, 14, 16)
         lay.setSpacing(3)
+        # Las secciones van en un área con desplazamiento: a 1280×800 ya no caben todas y, sin ella, el
+        # menú aplastaba (y recortaba) las acciones críticas de abajo, que quedan siempre fijas y visibles.
+        nav_host = QWidget()
+        nav_host.setObjectName("Content")
+        nav = QVBoxLayout(nav_host)
+        nav.setContentsMargins(0, 0, 0, 0)
+        nav.setSpacing(3)
         self.nav_buttons = {}
         labels = dict(self.NAV)
         for si, (sector, keys) in enumerate(self.NAV_SECTORS):
@@ -404,14 +416,23 @@ class MainWindow(QMainWindow):
             cap.setObjectName("NavTitle")
             if si:
                 cap.setStyleSheet("margin-top:12px;")
-            lay.addWidget(cap)
+            nav.addWidget(cap)
             for key in keys:
                 btn = NavButton(labels[key], NAV_ICONS.get(key))
                 btn.clicked.connect(lambda _=False, k=key: self._select(k))
                 self.nav_buttons[key] = btn
-                lay.addWidget(btn)
-        lay.addStretch(1)
+                nav.addWidget(btn)
+        nav.addStretch(1)
+        nav_scroll = QScrollArea()
+        nav_scroll.setObjectName("Content")
+        nav_scroll.setWidgetResizable(True)
+        nav_scroll.setFrameShape(QFrame.Shape.NoFrame)
+        nav_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        nav_scroll.setWidget(nav_host)
+        lay.addWidget(nav_scroll, 1)
+        self.nav_scroll = nav_scroll
         prot = QLabel("ACCIONES CRÍTICAS")
+        prot.setStyleSheet("margin-top:8px;")
         prot.setObjectName("NavTitle")
         lay.addWidget(prot)
 
@@ -476,6 +497,8 @@ class MainWindow(QMainWindow):
     def _select(self, key: str) -> None:
         for name, btn in self.nav_buttons.items():
             btn.set_active(name == key)
+        if key in self.nav_buttons:  # p. ej. desde «Ir al módulo» de un aviso: que la sección se vea en el menú
+            self.nav_scroll.ensureWidgetVisible(self.nav_buttons[key], 0, 8)
         order = [k for k, _ in self.NAV]
         self.stack.setCurrentIndex(order.index(key))
         self._fade_in(self.stack.currentWidget())
@@ -832,6 +855,7 @@ class MainWindow(QMainWindow):
         steps = [
             ("temporizadores", self._stop_all_timers),
             ("monitor", lambda: self.pages["monitor"].stop() if "monitor" in self.pages else None),
+            ("tareas largas", self._cancel_long_tasks),
             ("hilos en curso", self._wait_workers),
             ("honeypot", lambda: self.honeypot.stop() if self.honeypot is not None else None),
             ("configuración táctica",
@@ -850,6 +874,13 @@ class MainWindow(QMainWindow):
     def _stop_all_timers(self) -> None:
         for timer in self.findChildren(QTimer):  # recursivo: páginas, tarjetas, spinners…
             timer.stop()
+
+    def _cancel_long_tasks(self) -> None:
+        """Pide a sfc, DISM o defrag en curso que se detengan: así sus hilos acaban dentro de la espera."""
+        for page in self.pages.values():
+            cancel = getattr(page, "cancel_tasks", None)
+            if callable(cancel):
+                cancel()
 
     def _wait_workers(self) -> None:
         """Espera (con tope total) a los hilos vivos: los de run_task y los propios de las páginas."""

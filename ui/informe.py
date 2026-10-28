@@ -2,7 +2,8 @@
 ui/informe.py · LOZARUS KIT TOOL
 
 Puente entre las páginas y los módulos puros de puntuación e informe: lee el estado VIVO de la
-sesión (Escaneo de Vectores y Arsenal), calcula la Puntuación de Seguridad y exporta el informe HTML.
+sesión (Escaneo de Vectores, Arsenal, Almacenamiento y Salud del Sistema), calcula la Puntuación de
+Seguridad, toma las métricas de rendimiento del momento y exporta el informe ejecutivo HTML.
 """
 
 from __future__ import annotations
@@ -19,10 +20,12 @@ from PySide6.QtGui import QDesktopServices
 from PySide6.QtWidgets import QFileDialog
 
 from modulos import _arsenal as arsenal
+from modulos import _salud_sistema as health
 from modulos._base import CRITICAL, WARNING
 from modulos._forense import FORENSICS_DIR
-from modulos._informe import render_html
+from modulos._informe import CLASSIFICATION, DOC_VERSION, render_html, report_reference
 from modulos._puntuacion import next_step, security_score
+from modulos._rendimiento_disco import analyze_volumes
 
 from ui.theme import APP_NAME
 from ui.widgets import _emit_event
@@ -74,19 +77,46 @@ def collect_report(app) -> dict:
         {"title": t.title, "card": t.card, "applied": bool(snap["applied"].get(t.key)),
          "values": [arsenal.describe(v) for v in t.values], "backed_up": t.key in snap["backed_up"]}
         for t in arsenal.TWEAKS]
-    return {"app": APP_NAME, "host": socket.gethostname(), "user": getpass.getuser(),
+    now, host = dt.datetime.now(), socket.gethostname()
+    return {"app": APP_NAME, "host": host, "user": getpass.getuser(),
             "os": f"{platform.system()} {platform.release()} ({platform.version()})",
-            "admin": bool(getattr(app, "admin", False)), "generated": dt.datetime.now().strftime("%d/%m/%Y %H:%M"),
+            "admin": bool(getattr(app, "admin", False)), "generated": now.strftime("%d/%m/%Y %H:%M"),
             "security": result, "next_step": step, "audit_score": inputs["audit"],
-            "findings": findings, "ports": ports, "arsenal": tweaks}
+            "findings": findings, "ports": ports, "arsenal": tweaks,
+            "doc": {"reference": report_reference(host, now), "classification": CLASSIFICATION,
+                    "version": DOC_VERSION, "issued": now.strftime("%d/%m/%Y %H:%M"),
+                    "scope": "Seguridad, rendimiento y salud del sistema operativo"},
+            "performance": health.system_performance(), "storage": storage_report(app),
+            "health": health_report(app)}
+
+
+def storage_report(app) -> dict:
+    """Almacenamiento de la sesión (página Almacenamiento); sin ella, los volúmenes leídos al momento."""
+    page = getattr(app, "pages", {}).get("almacenamiento")
+    if page is not None and hasattr(page, "report_data"):
+        return page.report_data()
+    return {"volumes": analyze_volumes(), "scan": None, "recovered": 0, "recovered_by": [], "runs": 0,
+            "optimized": None, "space": None}
+
+
+def health_report(app) -> dict:
+    """Salud del sistema (página Salud); sin ella, el historial de integridad guardado en el equipo."""
+    page = getattr(app, "pages", {}).get("salud")
+    if page is not None and hasattr(page, "report_data"):
+        return page.report_data()
+    state = health.load_state()
+    integ = health.integrity_status(state)
+    verdict = health.health_verdict(None, integ)
+    return {"verdict": {"level": verdict["level"], "label": verdict["label"], "reasons": verdict["reasons"]},
+            "integrity": integ, "signals": None, "history": state.get("history", [])[:8]}
 
 
 def export_report(app) -> Optional[str]:
     """Pide destino, escribe el informe HTML, lo registra en la Caja Negra y lo abre en el navegador."""
     os.makedirs(REPORTS_DIR, exist_ok=True)
-    name = f"Informe_Lozarus_{socket.gethostname()}_{dt.datetime.now():%Y%m%d_%H%M}.html"
-    path, _ = QFileDialog.getSaveFileName(app, "Exportar informe de auditoría", os.path.join(REPORTS_DIR, name),
-                                          "Informe HTML (*.html)")
+    name = f"Informe_Ejecutivo_Lozarus_{socket.gethostname()}_{dt.datetime.now():%Y%m%d_%H%M}.html"
+    path, _ = QFileDialog.getSaveFileName(app, "Exportar informe ejecutivo de auditoría",
+                                          os.path.join(REPORTS_DIR, name), "Informe HTML (*.html)")
     if not path:
         return None
     data = collect_report(app)
@@ -98,9 +128,12 @@ def export_report(app) -> Optional[str]:
         return None
     sec = data["security"]
     _emit_event(app, source="informe", event_type="report.exported",
-                payload={"path": path, "score": sec["score"] if sec else None,
-                         "findings": len(data["findings"]), "ports": len(data["ports"] or [])})
-    app.console.log("*", f"Informe exportado: {path}")
-    Toast.notify(app, "*", "Informe exportado", os.path.basename(path), "fa5s.file-export")
+                payload={"path": path, "reference": data["doc"]["reference"], "score": sec["score"] if sec else None,
+                         "findings": len(data["findings"]), "ports": len(data["ports"] or []),
+                         "health": (data["health"].get("verdict") or {}).get("label"),
+                         "recovered_bytes": data["storage"].get("recovered", 0)})
+    app.console.log("*", f"Informe ejecutivo exportado ({data['doc']['reference']}): {path}")
+    Toast.notify(app, "*", "Informe exportado", f"{data['doc']['reference']} · {os.path.basename(path)}",
+                 "fa5s.file-export")
     QDesktopServices.openUrl(QUrl.fromLocalFile(path))
     return path

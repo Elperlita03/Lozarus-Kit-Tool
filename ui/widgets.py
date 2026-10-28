@@ -612,6 +612,12 @@ class Gauge(QWidget):
         self._value = max(0.0, min(100.0, float(value)))
         self.update()
 
+    def set_color(self, color: str) -> None:
+        """Color del arco (p. ej. semántico según el nivel de uso); solo repinta si cambia."""
+        if color != self._color:
+            self._color = color
+            self.update()
+
     def paintEvent(self, event) -> None:
         p = QPainter(self)
         p.setRenderHint(QPainter.RenderHint.Antialiasing)
