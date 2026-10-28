@@ -71,6 +71,7 @@ from ui.page_audit import AuditPage  # noqa: E402
 from ui.page_network import NetworkPage  # noqa: E402
 from ui.page_honeypot import HoneypotPage  # noqa: E402
 from ui.page_ghost import GhostPage  # noqa: E402
+from ui.page_arsenal import ArsenalPage  # noqa: E402
 from ui.page_history import HistorialPage  # noqa: E402
 
 __all__ = ["MainWindow", "NavButton", "HoldButton", "ProcessMonitor", "main"]  # ProcessMonitor: pruebas
@@ -230,11 +231,11 @@ class MainWindow(QMainWindow):
     NAV = [("comando", "Centro de Comando"), ("monitor", "Monitor en Vivo"),
            ("auditoria", "Escaneo de Vectores"), ("historial", "Historial"),
            ("red", "Endurecimiento de Red"), ("honeypot", "Honeypot"),
-           ("fantasma", "Modo Fantasma")]
+           ("fantasma", "Modo Fantasma"), ("arsenal", "Arsenal & Modo Fantasma")]
 
     NAV_SECTORS = [
         ("CENTRO DE CONTROL", ["comando", "monitor"]),
-        ("SISTEMA Y PERÍMETRO", ["auditoria", "red", "fantasma"]),
+        ("SISTEMA Y PERÍMETRO", ["auditoria", "red", "fantasma", "arsenal"]),
         ("LABORATORIO Y REGISTRO", ["honeypot", "historial"]),
     ]
 
@@ -316,7 +317,7 @@ class MainWindow(QMainWindow):
         self.pages = {"comando": CommandPage(self), "monitor": MonitorPage(self),
                       "auditoria": AuditPage(self), "historial": HistorialPage(self),
                       "red": NetworkPage(self), "honeypot": HoneypotPage(self),
-                      "fantasma": GhostPage(self)}
+                      "fantasma": GhostPage(self), "arsenal": ArsenalPage(self)}
         for page in self.pages.values():
             self.stack.addWidget(page)
         body.addWidget(self.stack, 1)
