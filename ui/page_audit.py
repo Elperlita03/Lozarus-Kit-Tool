@@ -9,20 +9,25 @@ from __future__ import annotations
 
 import argparse
 import importlib
+import os
 import sys
 from typing import TYPE_CHECKING, Optional, Tuple
 
+import psutil
 from PySide6.QtCore import QThread, Qt, Signal
 from PySide6.QtGui import QColor
-from PySide6.QtWidgets import (QButtonGroup, QHBoxLayout, QLabel, QPlainTextEdit, QProgressBar, QPushButton,
+from PySide6.QtWidgets import (QButtonGroup, QFrame, QHBoxLayout, QLabel, QPlainTextEdit, QProgressBar, QPushButton,
                                QTableWidgetItem, QTabWidget, QVBoxLayout, QWidget)
 
-from modulos._base import CRITICAL, INFO, PASS, WARNING, AuditContext, Report
+from modulos._base import CRITICAL, INFO, IS_WINDOWS, PASS, WARNING, AuditContext, Report
+from modulos._utilidades import run_cmd
 
 from ui.theme import COLORS, SEVERITY_COLORS, SEVERITY_ORDER, badge_qss
 from ui.widgets import (BentoCard, Page, _emit_event, frozen, icon, make_card, make_table, repolish,
                         set_busy, stat_chip, with_icon)
 from ui.chrome import Toast
+from ui.dialogs import ConfirmDialog
+from ui.page_monitor import PROTECTED_PROCS, _control_process, _same_process
 
 if TYPE_CHECKING:  # solo para las anotaciones; en ejecución evita el import circular
     from gui_qt import MainWindow
@@ -32,6 +37,14 @@ PORT_RISK_ORDER = {CRITICAL: 0, WARNING: 1, INFO: 2, PASS: 3}
 
 # Filtros rápidos de la telemetría: (clave, texto del chip).
 FILTERS = (("all", "TODOS"), ("critical", "CRITICAL"), ("warning", "WARNING"), ("exposed", "PUERTOS EXPUESTOS"))
+
+# Inspector de puertos: por qué un puerto en escucha es un vector de riesgo (texto defensivo).
+RISK_EXPOSED = ("Un puerto expuesto es una puerta abierta: cualquier equipo de la red (o de Internet, si el router "
+                "lo reenvía) puede conectarse, probar contraseñas por fuerza bruta o explotar una vulnerabilidad "
+                "del proceso que lo atiende para ejecutar código con sus privilegios. Cada servicio expuesto que "
+                "no necesitas amplía la superficie de ataque: ciérralo o bloquéalo en el firewall.")
+RISK_LOCAL = ("Solo escucha en loopback: otros equipos no lo alcanzan, pero un programa malicioso que ya corra "
+              "en este equipo sí puede usarlo para escalar privilegios o moverse entre procesos.")
 
 
 def ports_backend(modules) -> Optional[object]:
@@ -238,9 +251,10 @@ class AuditPage(Page):
     # --- Contadores y filtros --------------------------------------------------------------------
     def _counts(self) -> dict:
         ports = self._port_rows or []
+        ports = [r for r in ports if not r.get("mitigated")]
         crit = sum(1 for r in ports if r["severity"] is CRITICAL) + sum(1 for f in self.findings if f.severity is CRITICAL)
         warn = sum(1 for r in ports if r["severity"] is WARNING) + sum(1 for f in self.findings if f.severity is WARNING)
-        return {"all": len(ports) + len(self.findings), "critical": crit, "warning": warn,
+        return {"all": len(self._port_rows or []) + len(self.findings), "critical": crit, "warning": warn,
                 "exposed": sum(1 for r in ports if r["exposed"])}
 
     def _update_counters(self) -> None:
@@ -299,8 +313,39 @@ class AuditPage(Page):
         self.port_detail.setWordWrap(True)
         self.port_detail.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
         lay.addWidget(self.port_table, 1)
-        lay.addWidget(self.port_detail)
+        lay.addWidget(self._build_port_inspector())
         return host
+
+    def _build_port_inspector(self) -> QFrame:
+        """Inspector del puerto seleccionado: explicación defensiva (izq.) y acciones reales (der.)."""
+        self.inspector = QFrame()
+        self.inspector.setObjectName("Card")
+        row = QHBoxLayout(self.inspector)
+        row.setContentsMargins(16, 12, 16, 12)
+        row.setSpacing(18)
+        cols = []
+        for caption in ("POR QUÉ ES UN VECTOR DE RIESGO", "ACCIONES"):
+            col = QVBoxLayout()
+            col.setSpacing(8)
+            cap = QLabel(caption)
+            cap.setObjectName("ChipCap")
+            col.addWidget(cap)
+            cols.append(col)
+        cols[0].addWidget(self.port_detail, 1)
+        self.block_btn = QPushButton("Bloquear Puerto en Firewall")
+        self.kill_btn = QPushButton("Finalizar Proceso Propietario")
+        for button, icon_name, slot in ((self.block_btn, "fa5s.ban", self._block_port),
+                                        (self.kill_btn, "fa5s.times-circle", self._kill_owner)):
+            button.setObjectName("Danger")
+            button.setCursor(Qt.CursorShape.PointingHandCursor)
+            with_icon(button, icon_name, COLORS["danger"])
+            button.clicked.connect(slot)
+            cols[1].addWidget(button)
+        cols[1].addStretch(1)
+        row.addLayout(cols[0], 3)
+        row.addLayout(cols[1], 2)
+        self.inspector.setVisible(False)  # solo aparece al seleccionar un puerto en escucha
+        return self.inspector
 
     def _build_diag_tab(self) -> QWidget:
         host = QWidget()
@@ -355,6 +400,7 @@ class AuditPage(Page):
         rows = self._port_rows
         if rows is None:
             return (False, "Sin auditar todavía", "—")
+        rows = [r for r in rows if not r.get("mitigated")]
         crit = sum(1 for r in rows if r["severity"] is CRITICAL)
         warn = sum(1 for r in rows if r["severity"] is WARNING)
         color = COLORS["danger"] if crit else COLORS["warn"] if warn else COLORS["ok"]
@@ -430,14 +476,109 @@ class AuditPage(Page):
         Toast.notify(self.app, "x" if crit else "!" if warn else "*", "Auditoría de puertos", text,
                      "fa5s.satellite-dish")
 
-    def _show_port_detail(self) -> None:
+    def _selected_port(self) -> Optional[dict]:
         r = self.port_table.currentRow()
-        if self._port_rows is None or not 0 <= r < len(self._port_rows):
+        return self._port_rows[r] if self._port_rows and 0 <= r < len(self._port_rows) else None
+
+    @staticmethod
+    def _protected(row: dict) -> bool:
+        """Misma regla que el Monitor en Vivo: nunca finalizar procesos críticos de Windows ni Lozarus."""
+        return row["pid"] in (0, 4, os.getpid()) or (row["process"] or "").lower() in PROTECTED_PROCS
+
+    def _show_port_detail(self) -> None:
+        row = self._selected_port()
+        self.inspector.setVisible(row is not None)
+        if row is None:
             return
-        row = self._port_rows[r]
         where = "expuesto en la red" if row["exposed"] else "solo local"
-        self.port_detail.setText(f"{row['severity'].value} · {row['proto']} {row['ip']}:{row['port']} "
-                                 f"({row['service']}) · {row['process']} · {where}\n{row['why']}")
+        state = row["severity"].value if not row.get("mitigated") else "MITIGADO"
+        text = (f"{state} · {row['proto']} {row['ip']}:{row['port']} ({row['service']}) · {row['process']} · "
+                f"{where}\n{row['why']}\n\n{RISK_EXPOSED if row['exposed'] else RISK_LOCAL}")
+        if row.get("mitigated"):
+            text += f"\n\n✔ Mitigado: {row['mitigated']}."
+        self.port_detail.setText(text)
+        done = bool(row.get("mitigated"))
+        self.block_btn.setEnabled(not done)
+        killable = row["pid"] is not None and not self._protected(row)
+        self.kill_btn.setEnabled(killable and not done)
+        self.kill_btn.setToolTip("" if killable else "Proceso protegido del sistema o PID desconocido.")
+
+    def _block_port(self) -> None:
+        """Regla de entrada REAL en el Firewall de Windows (netsh advfirewall); exige Administrador."""
+        row = self._selected_port()
+        if row is None:
+            return
+        label = f"{row['proto']} {row['port']} ({row['service']})"
+        if not IS_WINDOWS:
+            Toast.notify(self.app, "!", "Firewall", "netsh advfirewall solo existe en Windows.", "fa5s.ban")
+            return
+        if not self.app.admin:
+            if ConfirmDialog.ask(self.app, "Se requiere Administrador",
+                                 "Crear reglas en el Firewall de Windows exige privilegios de Administrador. "
+                                 "¿Relanzar Lozarus elevado (UAC)?", confirm_text="Relanzar como Administrador"):
+                self.app.relaunch_as_admin()
+            return
+        if not ConfirmDialog.ask(self.app, "Bloquear puerto", f"Se creará una regla de entrada que bloquea {label}: "
+                                 "dejará de ser accesible desde otros equipos. ¿Continuar?",
+                                 confirm_text="Bloquear puerto", danger=True):
+            return
+        rule = f"Lozarus - Bloqueo {row['proto']} {row['port']}"
+        cmd = ["netsh", "advfirewall", "firewall", "add", "rule", f"name={rule}", "dir=in", "action=block",
+               f"protocol={row['proto']}", f"localport={row['port']}"]
+        self.app.log_tactical(f"Firewall: bloqueando {label}")
+        self.block_btn.setEnabled(False)
+        self.app.run_task(lambda emit: run_cmd(cmd), lambda ok, res: self._block_done(row, rule, ok, res))
+
+    def _block_done(self, row: dict, rule: str, ok: bool, res) -> None:
+        applied = ok and isinstance(res, tuple) and res[0] == 0
+        detail = (res[1] or res[2]).strip() if ok and isinstance(res, tuple) else str(res)
+        text = (f"Regla «{rule}» creada." if applied
+                else f"No se pudo bloquear {row['proto']} {row['port']}: {detail}")
+        self.app.console.log("*" if applied else "x", f"Firewall: {text}")
+        _emit_event(self.app, source="vectores:puertos", event_type="firewall.block",
+                    payload={"port": row["port"], "proto": row["proto"], "rule": rule, "ok": applied,
+                             "detail": detail})
+        Toast.notify(self.app, "*" if applied else "x", "Puerto bloqueado" if applied else "Firewall", text,
+                     "fa5s.ban")
+        if applied:
+            self._mark_mitigated(row, f"bloqueado en el firewall (regla «{rule}»)")
+        elif row is self._selected_port():
+            self._show_port_detail()  # reactiva los botones
+
+    def _kill_owner(self) -> None:
+        """Finaliza el proceso dueño del puerto con la lógica (y la confirmación) del Monitor en Vivo."""
+        row = self._selected_port()
+        if row is None or row["pid"] is None or self._protected(row):
+            return
+        name = None if row["process"] in ("?", "—") else row["process"]
+        try:
+            proc = psutil.Process(row["pid"])
+            same = _same_process(proc, name, None)
+        except psutil.Error:
+            same = False
+        if not same:
+            Toast.notify(self.app, "x", "Proceso no encontrado",
+                         f"PID {row['pid']} ya no es «{row['process']}». Repite la auditoría.", "fa5s.times-circle")
+            return
+        if _control_process(self.app, proc, "terminate", name):  # ConfirmDialog + Caja Negra + Toast
+            self._mark_mitigated(row, f"proceso «{row['process']}» (PID {row['pid']}) finalizado")
+
+    def _mark_mitigated(self, row: dict, how: str) -> None:
+        """Marca la fila como MITIGADO en verde y lo deja en la Caja Negra."""
+        row["mitigated"] = how
+        r = next(i for i, x in enumerate(self._port_rows) if x is row)
+        green = QColor(COLORS["ok"])
+        for col, text in ((0, "✔"), (1, "MITIGADO")):
+            item = self.port_table.item(r, col)
+            item.setText(text)
+            item.setForeground(green)
+        _emit_event(self.app, source="vectores:puertos", event_type="port.mitigated",
+                    payload={"port": row["port"], "proto": row["proto"], "pid": row["pid"], "how": how})
+        self.app.log_tactical(f"Puerto {row['proto']} {row['port']} MITIGADO: {how}")
+        self._refresh_metrics()
+        self._update_counters()
+        if row is self._selected_port():
+            self._show_port_detail()
 
     # --- Diagnóstico completo (todos los plugins) -----------------------------------------------
     def start(self) -> None:
