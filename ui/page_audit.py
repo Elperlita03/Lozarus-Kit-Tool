@@ -14,12 +14,12 @@ from typing import TYPE_CHECKING, Optional, Tuple
 
 from PySide6.QtCore import QThread, Qt, Signal
 from PySide6.QtGui import QColor
-from PySide6.QtWidgets import (QHBoxLayout, QLabel, QPlainTextEdit, QProgressBar, QPushButton,
+from PySide6.QtWidgets import (QButtonGroup, QHBoxLayout, QLabel, QPlainTextEdit, QProgressBar, QPushButton,
                                QTableWidgetItem, QTabWidget, QVBoxLayout, QWidget)
 
 from modulos._base import CRITICAL, INFO, PASS, WARNING, AuditContext, Report
 
-from ui.theme import COLORS, SEVERITY_COLORS, SEVERITY_ORDER
+from ui.theme import COLORS, SEVERITY_COLORS, SEVERITY_ORDER, badge_qss
 from ui.widgets import (BentoCard, Page, _emit_event, frozen, icon, make_card, make_table, repolish,
                         set_busy, stat_chip, with_icon)
 from ui.chrome import Toast
@@ -29,6 +29,9 @@ if TYPE_CHECKING:  # solo para las anotaciones; en ejecución evita el import ci
 
 # Orden de la telemetría de puertos: lo peligroso arriba, lo solo-local al final.
 PORT_RISK_ORDER = {CRITICAL: 0, WARNING: 1, INFO: 2, PASS: 3}
+
+# Filtros rápidos de la telemetría: (clave, texto del chip).
+FILTERS = (("all", "TODOS"), ("critical", "CRITICAL"), ("warning", "WARNING"), ("exposed", "PUERTOS EXPUESTOS"))
 
 
 def ports_backend(modules) -> Optional[object]:
@@ -146,24 +149,27 @@ class AuditPage(Page):
                                "La Auditoría de Puertos inventaría lo que escucha en este equipo y lo cruza "
                                "con la lista de servicios de riesgo. El diagnóstico completo ejecuta todos "
                                "los plugins de auditoría.")
+        # Tres acciones principales, cada una con su contador en vivo (píldora a la derecha).
         actions = QHBoxLayout()
-        actions.setSpacing(10)
-        self.ports_btn = QPushButton("Lanzar Auditoría de Puertos")
-        self.ports_btn.setObjectName("Primary")
-        self.ports_btn.setCursor(Qt.CursorShape.PointingHandCursor)
-        with_icon(self.ports_btn, "fa5s.satellite-dish")
-        self.ports_btn.clicked.connect(self.audit_ports)
-        self.run_btn = QPushButton(f"Diagnóstico completo ({len(app.modules)} plugins)")
-        self.run_btn.setObjectName("Ghost")
-        self.run_btn.setCursor(Qt.CursorShape.PointingHandCursor)
-        with_icon(self.run_btn, "fa5s.play", COLORS["muted"])
+        actions.setSpacing(12)
+        self.run_btn, self._diag_badge = self._action(
+            actions, f"Diagnóstico Completo ({len(app.modules)} Módulos)", "fa5s.shield-alt", "Primary",
+            "Hallazgos del último diagnóstico completo")
         self.run_btn.clicked.connect(self.start)
+        self.ports_btn, self._ports_badge = self._action(
+            actions, "Auditoría de Puertos en Vivo", "fa5s.satellite-dish", "Primary",
+            "Puertos expuestos a la red en la última auditoría")
+        self.ports_btn.clicked.connect(self.audit_ports)
+        self.fix_btn, self._fix_badge = self._action(
+            actions, "Mitigar Riesgos Detectados", "fa5s.magic", "Danger",
+            "Riesgos WARNING / CRITICAL pendientes (hallazgos + puertos de riesgo)")
+        self.fix_btn.setEnabled(False)
+        self.fix_btn.setToolTip("Las acciones de mitigación se activan en el siguiente paso del rediseño.")
+        actions.addStretch(1)
+        lay.addLayout(actions)
         self.status = QLabel("Listo para analizar")
         self.status.setObjectName("StatusMuted")
-        actions.addWidget(self.ports_btn)
-        actions.addWidget(self.run_btn)
-        actions.addWidget(self.status, 1)
-        lay.addLayout(actions)
+        lay.addWidget(self.status)
         self.progress = QProgressBar()
         self.progress.setTextVisible(False)
         self.progress.setRange(0, 100)
@@ -174,11 +180,107 @@ class AuditPage(Page):
             self.ports_btn.setToolTip("El plugin de puertos (modulos/04_puertos.py) no está disponible.")
         self.root.addWidget(panel)
 
+        # --- Filtros rápidos por severidad (sobre la telemetría) ------------------------------------
+        filters = QHBoxLayout()
+        filters.setSpacing(8)
+        cap = QLabel("FILTRAR")
+        cap.setObjectName("ChipCap")
+        filters.addWidget(cap)
+        self._filter = "all"
+        self._filter_group = QButtonGroup(self)
+        self._filter_group.setExclusive(True)
+        self._filter_btns = {}
+        for key, text in FILTERS:
+            chip = QPushButton(text)
+            chip.setObjectName("Chiplet")
+            chip.setCheckable(True)
+            chip.setCursor(Qt.CursorShape.PointingHandCursor)
+            chip.clicked.connect(lambda _=False, k=key: self._set_filter(k))
+            self._filter_group.addButton(chip)
+            self._filter_btns[key] = chip
+            filters.addWidget(chip)
+        self._filter_btns["all"].setChecked(True)
+        filters.addStretch(1)
+        self.root.addLayout(filters)
+
         # --- Telemetría -------------------------------------------------------------------------
         self.tabs = QTabWidget()
         self.tabs.addTab(self._build_ports_tab(), icon("fa5s.satellite-dish"), "Telemetría de puertos")
         self.tabs.addTab(self._build_diag_tab(), icon("fa5s.shield-alt"), "Diagnóstico completo")
         self.root.addWidget(self.tabs, 1)
+        self._update_counters()
+
+    @staticmethod
+    def _action(row, text: str, icon_name: str, kind: str, badge_tip: str):
+        """Botón de acción principal con su contador (píldora) pegado a la derecha."""
+        button = QPushButton(text)
+        button.setObjectName(kind)
+        button.setCursor(Qt.CursorShape.PointingHandCursor)
+        with_icon(button, icon_name, COLORS["danger"] if kind == "Danger" else None)
+        badge = QLabel("—")
+        badge.setToolTip(badge_tip)
+        badge.setStyleSheet(badge_qss(COLORS["faint"], 11))
+        badge.setProperty("lz_count", None)
+        row.addWidget(button)
+        row.addWidget(badge)
+        row.addSpacing(10)
+        return button, badge
+
+    @staticmethod
+    def _set_badge(badge: QLabel, count: Optional[int], color: str) -> None:
+        """Actualiza el contador; solo re-estiliza si cambia (cada setStyleSheet fuerza un re-polish)."""
+        if badge.property("lz_count") == (count, color):
+            return
+        badge.setProperty("lz_count", (count, color))
+        badge.setText("—" if count is None else str(count))
+        badge.setStyleSheet(badge_qss(color, 11))
+
+    # --- Contadores y filtros --------------------------------------------------------------------
+    def _counts(self) -> dict:
+        ports = self._port_rows or []
+        crit = sum(1 for r in ports if r["severity"] is CRITICAL) + sum(1 for f in self.findings if f.severity is CRITICAL)
+        warn = sum(1 for r in ports if r["severity"] is WARNING) + sum(1 for f in self.findings if f.severity is WARNING)
+        return {"all": len(ports) + len(self.findings), "critical": crit, "warning": warn,
+                "exposed": sum(1 for r in ports if r["exposed"])}
+
+    def _update_counters(self) -> None:
+        counts = self._counts()
+        for key, text in FILTERS:
+            label = f"{text} · {counts[key]}"
+            if self._filter_btns[key].text() != label:
+                self._filter_btns[key].setText(label)
+        diag = len(self.findings) if (self.findings or self.last_result is not None) else None
+        self._set_badge(self._diag_badge, diag, COLORS["text"] if diag else COLORS["faint"])
+        exposed = counts["exposed"] if self._port_rows is not None else None
+        self._set_badge(self._ports_badge, exposed, COLORS["warn"] if exposed else COLORS["faint"])
+        risks = counts["critical"] + counts["warning"]
+        known = self._port_rows is not None or self.findings or self.last_result is not None
+        self._set_badge(self._fix_badge, risks if known else None,
+                        COLORS["danger"] if counts["critical"] else COLORS["warn"] if risks else COLORS["faint"])
+
+    def _set_filter(self, key: str) -> None:
+        self._filter = key
+        if key == "exposed":
+            self.tabs.setCurrentIndex(0)  # el filtro de puertos expuestos vive en la telemetría de puertos
+        self._apply_filter()
+
+    def _port_visible(self, row: dict) -> bool:
+        f = self._filter
+        return (f == "all" or (f == "critical" and row["severity"] is CRITICAL)
+                or (f == "warning" and row["severity"] is WARNING) or (f == "exposed" and row["exposed"]))
+
+    def _finding_visible(self, finding) -> bool:
+        f = self._filter
+        return (f == "all" or (f == "critical" and finding.severity is CRITICAL)
+                or (f == "warning" and finding.severity is WARNING)
+                or (f == "exposed" and finding.module == "puertos"))
+
+    def _apply_filter(self) -> None:
+        """Oculta/muestra filas sin rehacer las tablas (setRowHidden: sin re-render completo)."""
+        for r, row in enumerate(self._port_rows or []):
+            self.port_table.setRowHidden(r, not self._port_visible(row))
+        for r, finding in enumerate(self.findings):
+            self.table.setRowHidden(r, not self._finding_visible(finding))
 
     def _build_ports_tab(self) -> QWidget:
         host = QWidget()
@@ -320,6 +422,8 @@ class AuditPage(Page):
         self.status.setObjectName("StatusWarn" if crit + warn else "StatusOk")
         repolish(self.status)
         self._refresh_metrics()
+        self._apply_filter()
+        self._update_counters()
         self.app.console.log("!" if crit + warn else "*", f"Auditoría de puertos: {text}")
         _emit_event(self.app, source="vectores:puertos", event_type="audit.ports",
                     payload={"listening": len(rows), "exposed": exposed, "critical": crit, "warning": warn})
@@ -344,6 +448,7 @@ class AuditPage(Page):
             return
         self.findings = []
         self.table.setRowCount(0)
+        self._update_counters()
         for val in self.counts.values():
             val.setText("0")
         self.score.setText("—")
@@ -377,6 +482,8 @@ class AuditPage(Page):
             if col == 0:
                 item.setForeground(QColor(SEVERITY_COLORS[finding.severity]))
             self.table.setItem(r, col, item)
+        self.table.setRowHidden(r, not self._finding_visible(finding))
+        self._update_counters()  # contador en vivo mientras llegan los hallazgos
         if finding.severity in (CRITICAL, WARNING):
             self.app.console.log("!", f"{finding.severity.value} · {finding.title}")
 
@@ -387,6 +494,7 @@ class AuditPage(Page):
         self.last_result = (score, c, w)  # lo lee el panel de salud del Centro de Comando
         self.score.setText(f"{score}/100")
         self._refresh_metrics()
+        self._update_counters()
         self.status.setText(f"Completado: {c} CRITICAL · {w} WARNING")
         self.status.setObjectName("StatusOk")
         repolish(self.status)
