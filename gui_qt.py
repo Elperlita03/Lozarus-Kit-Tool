@@ -41,8 +41,8 @@ BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 if BASE_DIR not in sys.path:
     sys.path.insert(0, BASE_DIR)
 
-from PySide6.QtCore import (Property, QEasingCurve, QPropertyAnimation, QRectF, QSize, QThread,  # noqa: E402
-                            QTimer, Qt, Signal)
+from PySide6.QtCore import (Property, QEasingCurve, QPropertyAnimation, QSize, QThread, QTimer,  # noqa: E402
+                            Qt, Signal)
 from PySide6.QtGui import QColor, QPainter  # noqa: E402
 from PySide6.QtWidgets import (QApplication, QDialog, QFrame, QGraphicsOpacityEffect, QHBoxLayout,  # noqa: E402
                                QLabel, QMainWindow, QPushButton, QSizeGrip, QSplitter,
@@ -89,7 +89,7 @@ class NavButton(QPushButton):
         self.setFixedHeight(44)
         self._active = False
         self._icon_name = icon_name
-        self._bg = QColor(0, 0, 0, 0)
+        self._bg = QColor(255, 255, 255, 0)
         self._anim = QPropertyAnimation(self, b"bg", self)
         self._anim.setDuration(170)
         self._anim.setEasingCurve(QEasingCurve.Type.OutCubic)
@@ -111,11 +111,18 @@ class NavButton(QPushButton):
 
     bg = Property(QColor, _get_bg, _set_bg)
 
+    # Fondo translúcido (blanco al 8 % activo, al 5 % en hover) sobre el degradado del menú.
+    BG_ACTIVE = QColor(255, 255, 255, 20)
+    BG_HOVER = QColor(255, 255, 255, 13)
+
     def _apply(self) -> None:
         c = self._bg
+        # Activo: barra blanca de 3 px a la izquierda (la sangría se compensa: el texto no salta).
+        edge = ("border-left: 3px solid #FFFFFF; padding-left: 11px; border-top-left-radius: 0;"
+                " border-bottom-left-radius: 0; font-weight: 600;" if self._active else "padding-left: 14px;")
         self.setStyleSheet(
             f"QPushButton#NavButton {{ background-color: rgba({c.red()},{c.green()},{c.blue()},{c.alpha()});"
-            f" text-align: left; padding-left: 14px; border: none; border-radius: 8px;"
+            f" text-align: left; border: none; border-radius: 8px; {edge}"
             f" color: {COLORS['text'] if self._active else COLORS['text2']}; font-size: 10pt; }}")
 
     def _to(self, color: QColor) -> None:
@@ -128,26 +135,17 @@ class NavButton(QPushButton):
         self._active = on
         self._apply()
         self._refresh_icon()
-        self._to(QColor(COLORS["accent_soft"]) if on else QColor(0, 0, 0, 0))
+        self._to(self.BG_ACTIVE if on else QColor(255, 255, 255, 0))
 
     def enterEvent(self, event) -> None:
         if not self._active:
-            self._to(QColor(COLORS["panel_alt"]))
+            self._to(self.BG_HOVER)
         super().enterEvent(event)
 
     def leaveEvent(self, event) -> None:
         if not self._active:
-            self._to(QColor(0, 0, 0, 0))
+            self._to(QColor(255, 255, 255, 0))
         super().leaveEvent(event)
-
-    def paintEvent(self, event) -> None:
-        super().paintEvent(event)
-        if self._active:  # barra de acento vertical a la izquierda del botón seleccionado
-            p = QPainter(self)
-            p.setPen(Qt.PenStyle.NoPen)
-            p.setBrush(QColor(COLORS["accent"]))
-            p.drawRoundedRect(QRectF(0, 9, 3, self.height() - 18), 1.5, 1.5)
-            p.end()
 
 
 class HoldButton(QPushButton):

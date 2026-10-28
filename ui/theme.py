@@ -24,10 +24,10 @@ SEVERITY_ORDER = (CRITICAL, WARNING, PASS, INFO, SKIP)
 
 # Paleta «Black & White Aura»: negro absoluto / gris vacío de fondo, blanco puro en texto y acentos.
 # Sin azules ni violetas; rojo, ámbar y verde quedan SOLO para estados de seguridad (con texto).
-# Solo HEX: el código los usa con QColor (border/border_hi = blanco al 20 % / 36 % sobre negro).
+# Solo HEX: el código los usa con QColor (border/border_hi = blanco al 18 % / 36 % sobre negro).
 COLORS = {
     "bg": "#000000", "bg_glow": "#050505", "sidebar": "#000000", "panel": "#050505", "panel2": "#050505",
-    "panel_alt": "#141414", "card": "#0A0A0A", "border": "#333333", "border_hi": "#5C5C5C",
+    "panel_alt": "#141414", "card": "#0A0A0A", "border": "#2E2E2E", "border_hi": "#5C5C5C",
     "text": "#FFFFFF", "text2": "#BDBDBD", "muted": "#8A8A8A", "faint": "#555555", "disabled": "#3A3A3A",
     "accent": "#FFFFFF", "accent_hover": "#D4D4D4", "accent_2": "#A3A3A3", "accent_soft": "#1A1A1A",
     "beacon": "#F87171", "terminal": "#4ADE80",
@@ -64,8 +64,10 @@ GLASS = {
     "card_hi": "rgba(255, 255, 255, 0.06)",
     "inset": "rgba(0, 0, 0, 0.6)",              # baldosas hundidas dentro de una tarjeta
     "selected": "rgba(255, 255, 255, 0.10)",    # elemento seleccionado
-    "border": "rgba(255, 255, 255, 0.2)",       # borde fino sobre el que destaca el aura
+    "border": "rgba(255, 255, 255, 0.18)",      # borde fino sobre el que destaca el aura
     "border_hi": "rgba(255, 255, 255, 0.36)",
+    "rim": "rgba(255, 255, 255, 0.38)",         # «rim light»: borde superior, la luz viene de arriba
+    "rim_hi": "rgba(255, 255, 255, 0.6)",
 }
 
 # Tokens SOLO para el QSS (admiten rgba() y degradados). Todo el «cristal» es QSS estático:
@@ -74,6 +76,8 @@ _QSS_TOKENS = {
     **COLORS,
     "border": GLASS["border"],                  # en el QSS, bordes blancos translúcidos de verdad
     "border_hi": GLASS["border_hi"],
+    "rim": GLASS["rim"],
+    "rim_hi": GLASS["rim_hi"],
     "line": "rgba(255, 255, 255, 0.45)",        # contorno de los botones
     "glass": GLASS["card"],
     "glass_hi": GLASS["card_hi"],
@@ -111,8 +115,10 @@ QSS = Template("""
 #Content { background: transparent; }
 #PageTitle { color: ${text}; font-size: 17pt; font-weight: 700; letter-spacing: 0.4px; }
 #PageSub { color: ${text2}; font-size: 10pt; }
-#Card { background-color: ${glass}; border: 1px solid ${border}; border-radius: 14px; }
-#Card:hover { border-color: ${border_hi}; }
+/* Tarjetas con volumen: borde fino al 18 % y «rim light» más brillante arriba (luz cenital). */
+#Card { background-color: ${glass}; border: 1px solid ${border}; border-top: 1px solid ${rim};
+    border-radius: 14px; }
+#Card:hover { border-color: ${border_hi}; border-top-color: ${rim_hi}; }
 #CardTitle { color: ${text}; font-size: 11pt; font-weight: 700; letter-spacing: 0.5px; }
 #CardText { color: ${text2}; font-size: 10pt; }
 /* Baldosas hundidas dentro de una tarjeta (componentes, paneles del Piloto Automático) */
@@ -210,13 +216,15 @@ QPlainTextEdit { font-family: ${mono}; }
 #StatusWarn { color: ${warn}; font-weight: 700; }
 #StatusMuted { color: ${text2}; }
 QScrollArea#Content { background: transparent; border: none; }
-QScrollBar:vertical { background: transparent; width: 8px; margin: 0; }
-QScrollBar::handle:vertical { background: ${border}; border-radius: 4px; min-height: 24px; }
-QScrollBar:horizontal { background: transparent; height: 8px; margin: 0; }
-QScrollBar::handle:horizontal { background: ${border}; border-radius: 4px; min-width: 24px; }
-QScrollBar::handle:hover { background: ${border_hi}; }
-QScrollBar::handle:pressed { background: ${faint}; }
-QScrollBar::add-line, QScrollBar::sub-line { height: 0; width: 0; }
+/* Barras de desplazamiento minimalistas: 8 px, sin pista ni flechas, asa blanca translúcida. */
+QScrollBar:vertical { background: transparent; width: 8px; margin: 0; border: none; }
+QScrollBar:horizontal { background: transparent; height: 8px; margin: 0; border: none; }
+QScrollBar::handle:vertical { background: rgba(255, 255, 255, 0.2); border-radius: 4px; min-height: 28px; }
+QScrollBar::handle:horizontal { background: rgba(255, 255, 255, 0.2); border-radius: 4px; min-width: 28px; }
+QScrollBar::handle:vertical:hover, QScrollBar::handle:horizontal:hover { background: rgba(255, 255, 255, 0.45); }
+QScrollBar::handle:vertical:pressed, QScrollBar::handle:horizontal:pressed { background: rgba(255, 255, 255, 0.6); }
+QScrollBar::add-line, QScrollBar::sub-line { width: 0; height: 0; border: none; background: none; }
+QScrollBar::up-arrow, QScrollBar::down-arrow, QScrollBar::left-arrow, QScrollBar::right-arrow { background: none; }
 QScrollBar::add-page, QScrollBar::sub-page { background: none; }
 /* Tablas: transparentes sobre el cristal, filas de alto fijo (make_table), sin rejilla ni foco. */
 QTableWidget { background-color: transparent; alternate-background-color: rgba(255, 255, 255, 0.022);
@@ -240,8 +248,9 @@ QTabBar::tab:selected { background: ${glass_hi}; color: #FFFFFF; border-color: $
 QProgressBar { background-color: ${border}; border: none; border-radius: 3px; max-height: 6px;
     text-align: center; color: transparent; }
 QProgressBar::chunk { background: ${grad_accent}; border-radius: 3px; }
-#Chip { background-color: ${glass}; border: 1px solid ${border}; border-radius: 12px; }
-#Chip:hover { border-color: ${border_hi}; }
+#Chip { background-color: ${glass}; border: 1px solid ${border}; border-top: 1px solid ${rim};
+    border-radius: 12px; }
+#Chip:hover { border-color: ${border_hi}; border-top-color: ${rim_hi}; }
 #ChipCap { color: ${text2}; font-size: 8pt; font-weight: 700; letter-spacing: 1px; }
 #ChipVal { color: ${text}; font-size: 15pt; font-weight: 700; }
 #Detail { background-color: ${field}; border: 1px solid ${border}; border-radius: 10px; color: ${text2};

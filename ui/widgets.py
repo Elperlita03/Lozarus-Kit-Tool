@@ -16,7 +16,7 @@ from typing import Any, Callable, Iterator, Optional, Sequence, Tuple
 from PySide6.QtCore import (Property, QEasingCurve, QEvent, QPointF, QPropertyAnimation, QRect, QRectF,
                             QSize, QThread, QTimer, Qt, Signal)
 from PySide6.QtGui import (QBrush, QColor, QFont, QIcon, QImage, QPainter, QPainterPath, QPen, QPixmap,
-                           QPolygonF)
+                           QPolygonF, QRadialGradient)
 from PySide6.QtWidgets import (QAbstractItemView, QFrame, QGraphicsDropShadowEffect, QGraphicsScene,
                                QHBoxLayout, QLabel, QPushButton, QScrollArea, QTableWidget, QVBoxLayout,
                                QWidget)
@@ -59,8 +59,8 @@ def with_icon(button, name: str, color: Optional[str] = None, size: int = 16):
 #     cuerpo de cada página) lo pinta en 9 piezas alrededor de ellas: actualizar o desplazar el
 #     contenido solo copia píxeles.
 #   · Botones de acción y paneles flotantes (Toast, alertas): efecto en vivo; son pequeños.
-AURA_BLUR = 25
-AURA_ALPHA = 0.15                                   # blanco al 15 %
+AURA_BLUR = 28
+AURA_ALPHA = 0.30                                   # blanco al 30 %: presencia real sobre el negro
 AURA_PAD = 2 * AURA_BLUR                            # hasta dónde llega el halo fuera del widget
 AURA_RADIUS = {"Card": 14, "Bento": 14, "Chip": 12}  # tarjetas con aura -> radio de esquina (QSS)
 AURA_BUTTONS = {"", "Primary", "Danger", "Warn"}    # botones de acción (no los de utilidad)
@@ -130,10 +130,27 @@ def _paint_aura(p: QPainter, rect: QRect, radius: int, clip: QRect) -> None:
             p.drawPixmap(target, sprite, QRect(*src))
 
 
+# Luz ambiental: un foco tenue y estático en la parte superior central de cada página.
+AMBIENT_ALPHA = 16                                  # blanco 16/255 en el centro -> transparente
+
+
+def _paint_ambient(p: QPainter, width: int, clip: QRect) -> None:
+    """Degradado radial fijo (sin animación) centrado arriba; solo rellena la parte que toca `clip`."""
+    radius = max(420.0, width * 0.45)
+    area = QRect(int(width / 2 - radius), 0, int(2 * radius), int(radius)).intersected(clip)
+    if area.isEmpty():
+        return
+    glow = QRadialGradient(QPointF(width / 2, 0), radius)
+    glow.setColorAt(0.0, QColor(255, 255, 255, AMBIENT_ALPHA))
+    glow.setColorAt(1.0, QColor(0, 0, 0, 0))
+    p.fillRect(area, QBrush(glow))
+
+
 class AuraHost(QWidget):
     """
-    Cuerpo de una página: pinta el aura de sus tarjetas DIRECTAS desde el sprite en caché. Si una
-    tarjeta se mueve, cambia de tamaño o se oculta, repinta el cuerpo (el halo sobresale del widget).
+    Cuerpo de una página: pinta la luz ambiental y el aura de sus tarjetas DIRECTAS desde el sprite
+    en caché. Si una tarjeta se mueve, cambia de tamaño o se oculta, repinta el cuerpo (el halo
+    sobresale del widget).
     """
 
     def childEvent(self, event) -> None:
@@ -150,6 +167,7 @@ class AuraHost(QWidget):
     def paintEvent(self, event) -> None:
         clip = event.rect()
         p = QPainter(self)
+        _paint_ambient(p, self.width(), clip)  # primero la atmósfera, encima los halos
         for child in self.children():
             radius = AURA_RADIUS.get(child.objectName()) if isinstance(child, QWidget) else None
             if radius and child.isVisible():
@@ -345,10 +363,10 @@ class Page(QWidget):
         super().__init__()
         self.setObjectName("Content")
         outer = QVBoxLayout(self)
-        outer.setContentsMargins(18, 26, 18, 16)  # + 12 px del cuerpo: hueco para el aura de las tarjetas
+        outer.setContentsMargins(10, 26, 10, 16)  # + 20 px del cuerpo: hueco para el aura de las tarjetas
         outer.setSpacing(16)
         header = QHBoxLayout()
-        header.setContentsMargins(12, 0, 12, 0)
+        header.setContentsMargins(20, 0, 20, 0)
         header.setSpacing(14)
         if icon_name:
             ic = QLabel()
@@ -374,7 +392,7 @@ class Page(QWidget):
         body = AuraHost()  # pinta el aura de las tarjetas de la página
         body.setObjectName("Content")
         self.root = QVBoxLayout(body)
-        self.root.setContentsMargins(12, 8, 16, 14)
+        self.root.setContentsMargins(20, 12, 24, 22)
         self.root.setSpacing(16)
         scroll.setWidget(body)
         outer.addWidget(scroll, 1)
@@ -483,8 +501,10 @@ class BentoCard(QFrame):
 
     def _apply(self):
         c = self._border
+        rim = max(0.38, c.red() / 255)  # rim light: el borde superior nunca queda por debajo de 0.38
         self.setStyleSheet(f"#Bento {{ background:{GLASS['card']}; border:1px solid "
-                           f"rgb({c.red()},{c.green()},{c.blue()}); border-radius:14px; }}")
+                           f"rgb({c.red()},{c.green()},{c.blue()}); border-top:1px solid "
+                           f"rgba(255,255,255,{rim:.2f}); border-radius:14px; }}")
 
     def _to(self, color):
         self._anim.stop()
