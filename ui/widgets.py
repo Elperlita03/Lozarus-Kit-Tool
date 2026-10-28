@@ -7,14 +7,17 @@ el hilo de trabajo (Worker), gráficos del Centro de Comando y utilidades compar
 
 from __future__ import annotations
 
+import math
+import random
 import socket
+import time
 from collections import deque
 from contextlib import contextmanager
 from functools import lru_cache
 from typing import Any, Callable, Iterator, Optional, Sequence, Tuple
 
-from PySide6.QtCore import (Property, QEasingCurve, QEvent, QPointF, QPropertyAnimation, QRect, QRectF,
-                            QSize, QThread, QTimer, Qt, Signal)
+from PySide6.QtCore import (Property, QEasingCurve, QEvent, QPoint, QPointF, QPropertyAnimation, QRect,
+                            QRectF, QSize, QThread, QTimer, Qt, Signal)
 from PySide6.QtGui import (QBrush, QColor, QFont, QIcon, QImage, QPainter, QPainterPath, QPen, QPixmap,
                            QPolygonF, QRadialGradient)
 from PySide6.QtWidgets import (QAbstractItemView, QFrame, QGraphicsDropShadowEffect, QGraphicsScene,
@@ -126,7 +129,7 @@ def _paint_aura(p: QPainter, rect: QRect, radius: int, clip: QRect) -> None:
                      ((x + c, y, w - 2 * c, c), (c, 0, 2, c)), ((x + c, y + h - c, w - 2 * c, c), (c, s - c, 2, c)),
                      ((x, y + c, c, h - 2 * c), (0, c, c, 2)), ((x + w - c, y + c, c, h - 2 * c), (s - c, c, c, 2))):
         target = QRect(*dst)
-        if target.intersects(clip):
+        if clip.intersects(target):  # clip: QRect o QRegion
             p.drawPixmap(target, sprite, QRect(*src))
 
 
@@ -146,12 +149,151 @@ def _paint_ambient(p: QPainter, width: int, clip: QRect) -> None:
     p.fillRect(area, QBrush(glow))
 
 
+# ---------------------------------------------------------------------------
+# FONDO ANIMADO «COSMOS»: partículas de luz que derivan despacio por detrás de las tarjetas
+# ---------------------------------------------------------------------------
+# Coste acotado: 48 partículas a 30 FPS, SOLO mientras la página se ve (el temporizador se para al
+# ocultarla o minimizar). Cada fotograma invalida únicamente el recuadro diminuto de las partículas
+# que CAMBIAN de aspecto (otro píxel o otro nivel de brillo): a esta velocidad casi todas avanzan
+# menos de medio píxel por fotograma, así que Qt solo repinta lo que de verdad se ve distinto.
+PARTICLE_COUNT = 48
+PARTICLE_FPS = 30
+PARTICLE_SPEED = (4.0, 12.0)                # px/s: deriva lenta
+PARTICLE_LEVELS = 20                        # niveles de brillo del parpadeo (cuantizado)
+PARTICLE_BLOCKERS_EVERY = PARTICLE_FPS      # fotogramas entre recálculos de las zonas con aura en vivo
+PARTICLE_RADII = (0.8, 1.2, 1.7, 2.4)       # núcleo de cada luz (px); 4 tamaños → 4 sprites en caché
+PARTICLE_HALO = 3.5                          # el halo de cada luz mide 3,5 veces su núcleo
+
+
+class _Particle:
+    # x, y, phase: estado continuo · px, py, level: lo pintado (píxel entero y nivel de brillo)
+    __slots__ = ("x", "y", "vx", "vy", "r", "alpha", "phase", "twinkle", "px", "py", "level")
+
+    def look(self) -> tuple:
+        level = round(self.alpha * (0.65 + 0.35 * math.sin(self.phase)) * PARTICLE_LEVELS)
+        return int(self.x), int(self.y), level
+
+
+@lru_cache(maxsize=len(PARTICLE_RADII))
+def _particle_sprite(r: float) -> QPixmap:
+    """Luz blanca suave (núcleo + halo) pre-renderizada UNA vez por tamaño."""
+    halo = r * PARTICLE_HALO
+    size = int(math.ceil(2 * halo)) + 2
+    img = QImage(size, size, QImage.Format.Format_ARGB32_Premultiplied)
+    img.fill(Qt.GlobalColor.transparent)
+    grad = QRadialGradient(QPointF(size / 2, size / 2), halo)
+    grad.setColorAt(0.0, QColor(255, 255, 255, 255))
+    grad.setColorAt(r / halo, QColor(255, 255, 255, 190))
+    grad.setColorAt(1.0, QColor(255, 255, 255, 0))
+    p = QPainter(img)
+    p.setRenderHint(QPainter.RenderHint.Antialiasing)
+    p.setPen(Qt.PenStyle.NoPen)
+    p.setBrush(QBrush(grad))
+    p.drawEllipse(QPointF(size / 2, size / 2), halo, halo)
+    p.end()
+    return QPixmap.fromImage(img)
+
+
 class AuraHost(QWidget):
     """
-    Cuerpo de una página: pinta la luz ambiental y el aura de sus tarjetas DIRECTAS desde el sprite
-    en caché. Si una tarjeta se mueve, cambia de tamaño o se oculta, repinta el cuerpo (el halo
-    sobresale del widget).
+    Cuerpo de una página: pinta la luz ambiental, las partículas del fondo animado y el aura de
+    sus tarjetas DIRECTAS desde el sprite en caché. Si una tarjeta se mueve, cambia de tamaño o se
+    oculta, repinta el cuerpo (el halo sobresale del widget).
     """
+
+    def __init__(self, parent: Optional[QWidget] = None):
+        super().__init__(parent)
+        self._particles: list = []
+        self._rng = random.Random()
+        self._last_t: Optional[float] = None
+        self._blockers: list = []     # zonas con aura EN VIVO (botones): ahí las luces se apagan
+        self._frame = 0
+        self._timer = QTimer(self)
+        self._timer.setInterval(1000 // PARTICLE_FPS)
+        self._timer.timeout.connect(self._step)
+
+    # --- motor de animación: solo corre con la página a la vista ------------------------------
+    def showEvent(self, event) -> None:
+        super().showEvent(event)
+        self._last_t = None
+        self._timer.start()
+
+    def hideEvent(self, event) -> None:
+        super().hideEvent(event)
+        self._timer.stop()
+
+    def _spawn(self, area: QRect) -> _Particle:
+        rng, pt = self._rng, _Particle()
+        pt.x = rng.uniform(area.left(), area.right())
+        pt.y = rng.uniform(area.top(), area.bottom())
+        angle = rng.uniform(-math.pi * 0.85, -math.pi * 0.15)   # deriva ligera hacia arriba
+        speed = rng.uniform(*PARTICLE_SPEED)
+        pt.vx, pt.vy = math.cos(angle) * speed, math.sin(angle) * speed
+        pt.r = rng.choice(PARTICLE_RADII)
+        pt.alpha = rng.uniform(0.25, 0.8)
+        pt.phase = rng.uniform(0, 2 * math.pi)
+        pt.twinkle = rng.uniform(0.4, 1.4)                       # rad/s del parpadeo
+        pt.px, pt.py, pt.level = pt.look()
+        return pt
+
+    def _live_effect_zones(self) -> list:
+        """
+        Zonas de los widgets con aura EN VIVO (botones de acción). Una luz que pasara por detrás
+        obligaría a re-desenfocar el botón en cada fotograma, así que ahí las partículas se apagan.
+        """
+        zones = []
+        for w in self.findChildren(QWidget):
+            effect = w.graphicsEffect()
+            if effect is not None and effect.isEnabled() and w.isVisible():
+                zones.append(QRect(w.mapTo(self, QPoint(0, 0)), w.size())
+                             .adjusted(-AURA_PAD, -AURA_PAD, AURA_PAD, AURA_PAD))
+        return zones
+
+    def _dirty(self, x0: float, y0: float, x1: float, y1: float, r: float) -> None:
+        pad = r * PARTICLE_HALO + 2
+        self.update(QRect(int(min(x0, x1) - pad), int(min(y0, y1) - pad),
+                          int(abs(x1 - x0) + 2 * pad) + 1, int(abs(y1 - y0) + 2 * pad) + 1))
+
+    def _step(self) -> None:
+        area = self.visibleRegion().boundingRect()
+        if area.isEmpty():
+            return
+        now = time.monotonic()
+        dt = 0.0 if self._last_t is None else min(now - self._last_t, 0.1)  # tope: sin saltos tras una pausa
+        self._last_t = now
+        while len(self._particles) < PARTICLE_COUNT:
+            pt = self._spawn(area)
+            self._particles.append(pt)
+            self._dirty(pt.x, pt.y, pt.x, pt.y, pt.r)
+        if self._frame % PARTICLE_BLOCKERS_EVERY == 0:
+            self._blockers = self._live_effect_zones()
+        self._frame += 1
+        left, top = area.left(), area.top()
+        width, height = max(1, area.width()), max(1, area.height())
+        for pt in self._particles:
+            pt.x += pt.vx * dt
+            pt.y += pt.vy * dt
+            pt.phase += pt.twinkle * dt
+            wrapped = not area.contains(int(pt.x), int(pt.y))
+            if wrapped:  # sale por un borde (o el scroll la dejó fuera): reaparece por el opuesto
+                pt.x = left + (pt.x - left) % width
+                pt.y = top + (pt.y - top) % height
+            look = pt.look()
+            if look[2] > 0 and self._blockers:
+                spot = QRect(look[0] - 4, look[1] - 4, 9, 9)
+                if any(zone.intersects(spot) for zone in self._blockers):
+                    look = (look[0], look[1], 0)  # detrás de un botón con aura en vivo: apagada
+            if look == (pt.px, pt.py, pt.level):
+                continue  # mismo píxel y mismo brillo: nada que repintar
+            x0, y0, was_lit = pt.px, pt.py, pt.level > 0
+            pt.px, pt.py, pt.level = look
+            if not was_lit and look[2] == 0:
+                continue  # apagada antes y ahora: no hay nada que borrar ni que pintar
+            if wrapped:
+                self._dirty(x0, y0, x0, y0, pt.r)
+                self._dirty(pt.px, pt.py, pt.px, pt.py, pt.r)
+            else:
+                self._dirty(x0, y0, pt.px, pt.py, pt.r)
 
     def childEvent(self, event) -> None:
         super().childEvent(event)
@@ -165,15 +307,23 @@ class AuraHost(QWidget):
         return False
 
     def paintEvent(self, event) -> None:
-        clip = event.rect()
+        region = event.region()  # región EXACTA (las partículas la dejan en muchos recuadros pequeños)
         p = QPainter(self)
-        _paint_ambient(p, self.width(), clip)  # primero la atmósfera, encima los halos
-        for child in self.children():
+        _paint_ambient(p, self.width(), region.boundingRect())  # 1) atmósfera
+        for pt in self._particles:                                # 2) partículas del fondo
+            sprite = _particle_sprite(pt.r)
+            side = sprite.width()
+            x, y = pt.px - side // 2, pt.py - side // 2           # lo mismo que _step invalidó
+            if pt.level > 0 and region.intersects(QRect(x, y, side, side)):
+                p.setOpacity(pt.level / PARTICLE_LEVELS)          # parpadeo suave (cuantizado)
+                p.drawPixmap(x, y, sprite)
+        p.setOpacity(1.0)
+        for child in self.children():                             # 3) halos de las tarjetas
             radius = AURA_RADIUS.get(child.objectName()) if isinstance(child, QWidget) else None
             if radius and child.isVisible():
                 rect = child.geometry()
-                if rect.adjusted(-AURA_PAD, -AURA_PAD, AURA_PAD, AURA_PAD).intersects(clip):
-                    _paint_aura(p, rect, radius, clip)
+                if region.intersects(rect.adjusted(-AURA_PAD, -AURA_PAD, AURA_PAD, AURA_PAD)):
+                    _paint_aura(p, rect, radius, region)
         p.end()
 
 
