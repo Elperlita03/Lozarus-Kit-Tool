@@ -12,7 +12,7 @@ import time
 from typing import TYPE_CHECKING
 
 import psutil
-from PySide6.QtCore import QTimer
+from PySide6.QtCore import QTimer, Qt
 from PySide6.QtGui import QColor
 from PySide6.QtWidgets import (QFileDialog, QFrame, QHBoxLayout, QLabel, QPushButton,
                                QTableWidgetItem)
@@ -24,11 +24,16 @@ from modulos._inicio import startup_entries
 
 from ui._compat import ObservationQuality
 from ui.theme import COLORS
-from ui.widgets import Page, _emit_event, frozen, make_card, make_table, set_busy, with_icon
+from ui.widgets import BentoCard, Page, _emit_event, frozen, make_card, make_table, set_busy, with_icon
 from ui.dialogs import ConfirmDialog, TerminalDialog
 
 if TYPE_CHECKING:  # solo para las anotaciones; en ejecución evita el import circular
     from gui_qt import MainWindow
+
+SYSTEM_DRIVE = os.environ.get("SystemDrive", "C:") + "\\"   # disco principal de Windows (C:\\)
+HEALTH_REFRESH_S = 15        # al volver a la página, se relee la salud como mucho cada 15 s
+DISK_LOW_PCT = 15            # por debajo de este % libre, el disco se marca en ámbar
+BATTERY_LOW_PCT = 20         # por debajo, y sin cargador, la batería se marca en ámbar
 
 
 class GhostPage(Page):
@@ -42,6 +47,11 @@ class GhostPage(Page):
         self.app = app
         self._clip_last = None
         self._clip_last_time = None
+        self._hw = {"batt": None, "disk": None}   # última lectura de salud (la pintan las BentoCard)
+        self._health_busy = False
+        self._health_at = None                      # monotonic de la última lectura
+        self._autoruns_busy = False
+        self._autoruns_done = False
 
         body = self.root
         body.addWidget(self._build_shredder_card())
@@ -49,7 +59,7 @@ class GhostPage(Page):
         body.addWidget(self._build_ram_card())
         body.addWidget(self._build_temp_card())
         body.addWidget(self._build_purge_card())
-        body.addWidget(self._build_health_card())
+        self._add_health_section(body)
         body.addWidget(self._build_autoruns_card())
         body.addStretch(1)
 
@@ -338,22 +348,71 @@ class GhostPage(Page):
         term.show()
         self.app.run_ghost(options, term, lambda: set_busy(self.run_btn, False))
 
-    # --- Salud del portátil (batería, disco, top procesos) ----------------------------------------
-    def _build_health_card(self) -> QFrame:
-        box, lay = make_card("Salud del portátil",
-                             "Batería, espacio en C: y los 5 procesos que más RAM/CPU consumen ahora.")
+    # --- Salud del hardware (batería, disco, top procesos) ---------------------------------------
+    def showEvent(self, event) -> None:
+        """Al entrar en la página: relee la salud (si la lectura tiene más de 15 s) y, la primera vez,
+        escanea el inicio. Sin temporizadores: mientras no se mira la página, no cuesta nada."""
+        super().showEvent(event)
+        if self._health_at is None or time.monotonic() - self._health_at > HEALTH_REFRESH_S:
+            self._refresh_health()
+        if not self._autoruns_done:
+            self._scan_autoruns()
+
+    def _add_health_section(self, body) -> None:
+        title = QLabel("Salud del hardware")
+        title.setObjectName("CardTitle")
+        title.setStyleSheet("margin-top:4px;")
+        body.addWidget(title)
+        # Las BentoCard van directamente en el cuerpo de la página: así cada una lleva su propio aura.
         row = QHBoxLayout()
-        row.setSpacing(10)
-        self._health_lbl = QLabel("Pulsa Actualizar para leer.")
-        self._health_lbl.setObjectName("CardText")
-        self._health_lbl.setWordWrap(True)
-        refresh_btn = QPushButton("Actualizar")
-        refresh_btn.setObjectName("Ghost")
-        with_icon(refresh_btn, "fa5s.sync-alt", COLORS["muted"])
-        refresh_btn.clicked.connect(self._refresh_health)
-        row.addWidget(self._health_lbl, 1)
-        row.addWidget(refresh_btn)
-        lay.addLayout(row)
+        row.setSpacing(16)
+        self._batt_card = BentoCard("fa5s.battery-three-quarters", "Batería",
+                                    "Carga y conexión a la corriente.", self._battery_status,
+                                    self._refresh_health)
+        self._disk_card = BentoCard("fa5s.hdd", f"Disco principal ({SYSTEM_DRIVE[:2]})",
+                                    "Espacio libre frente al total.", self._disk_status,
+                                    self._refresh_health)
+        for card in (self._batt_card, self._disk_card):
+            card.setToolTip("Clic para volver a leer")
+            row.addWidget(card, 1)
+        body.addLayout(row)
+        body.addWidget(self._build_top_card())
+
+    def _battery_status(self):
+        batt = self._hw["batt"]
+        if batt is None:
+            return (False, "Leyendo…", "—")
+        if batt == "desktop":  # psutil.sensors_battery() devolvió None: no hay batería
+            return (COLORS["ok"], "Sin batería: alimentación de red", "PC de escritorio")
+        if isinstance(batt, str):
+            return (COLORS["warn"], batt, "—")
+        pct, plugged, secs = batt
+        if plugged:
+            text = "Conectado a la corriente"
+        elif isinstance(secs, int) and secs >= 0:
+            text = f"Con batería · {secs // 3600} h {secs % 3600 // 60:02d} min restantes"
+        else:
+            text = "Con batería"
+        ok = plugged or pct >= BATTERY_LOW_PCT
+        return (COLORS["ok"] if ok else COLORS["warn"], text, f"{pct:.0f} %")
+
+    def _disk_status(self):
+        disk = self._hw["disk"]
+        if disk is None:
+            return (False, "Leyendo…", "—")
+        if isinstance(disk, str):
+            return (COLORS["warn"], disk, "—")
+        free, total = disk
+        pct = free / total * 100 if total else 0.0
+        text = f"de {total / 1024 ** 3:.1f} GB · {pct:.0f} % libre"
+        if pct < DISK_LOW_PCT:
+            text += " · queda poco espacio"
+        return (COLORS["ok"] if pct >= DISK_LOW_PCT else COLORS["warn"], text,
+                f"{free / 1024 ** 3:.1f} GB libres")
+
+    def _build_top_card(self) -> QFrame:
+        box, lay = make_card("Procesos que más consumen",
+                             "Los 5 procesos con más RAM ahora mismo (se lee al entrar en la página).")
         self._top_table = make_table(["Proceso", "PID", "CPU %", "RAM MB", "Usuario"],
                                      widths=[200, 70, 70, 80])
         self._top_table.setMaximumHeight(180)
@@ -364,28 +423,36 @@ class GhostPage(Page):
         self._health_terminate_btn.setEnabled(False)
         self._health_terminate_btn.clicked.connect(self._terminate_selected_proc)
         self._top_table.itemSelectionChanged.connect(self._on_top_select)
-        row2 = QHBoxLayout()
-        row2.addWidget(self._health_terminate_btn)
-        row2.addStretch(1)
-        lay.addLayout(row2)
+        refresh_btn = QPushButton("Actualizar")
+        refresh_btn.setObjectName("Ghost")
+        with_icon(refresh_btn, "fa5s.sync-alt", COLORS["muted"])
+        refresh_btn.clicked.connect(self._refresh_health)
+        row = QHBoxLayout()
+        row.setSpacing(10)
+        row.addWidget(self._health_terminate_btn)
+        row.addStretch(1)
+        row.addWidget(refresh_btn)
+        lay.addLayout(row)
         return box
 
     def _refresh_health(self) -> None:
+        if self._health_busy:
+            return
+        self._health_busy = True
+
         def task(emit):
             out = {}
             try:
                 batt = psutil.sensors_battery()
-                if batt:
-                    out["batt"] = f"{batt.percent:.0f}%  {'enchufado' if batt.power_plugged else 'batería'}"
-                else:
-                    out["batt"] = "PC de escritorio (sin batería)"
-            except Exception:  # noqa: BLE001
-                out["batt"] = "N/A"
+                out["batt"] = "desktop" if batt is None else (batt.percent, bool(batt.power_plugged),
+                                                              batt.secsleft)
+            except Exception as exc:  # noqa: BLE001
+                out["batt"] = f"No se pudo leer: {exc}"
             try:
-                du = psutil.disk_usage("C:\\")
-                out["disk_free"] = f"{du.free / 1024**3:.1f} GB libres de {du.total / 1024**3:.1f} GB"
-            except Exception:  # noqa: BLE001
-                out["disk_free"] = "N/A"
+                du = psutil.disk_usage(SYSTEM_DRIVE)
+                out["disk"] = (du.free, du.total)
+            except Exception as exc:  # noqa: BLE001
+                out["disk"] = f"No se pudo leer {SYSTEM_DRIVE}: {exc}"
             try:
                 procs = []
                 for p in psutil.process_iter(["pid", "name", "username", "memory_info", "cpu_percent"]):
@@ -395,19 +462,22 @@ class GhostPage(Page):
                                       "ram": (p.info["memory_info"].rss / 1024**2) if p.info["memory_info"] else 0})
                     except Exception:  # noqa: BLE001
                         continue
-                top5 = sorted(procs, key=lambda x: x["ram"], reverse=True)[:5]
-                out["top5"] = top5
+                out["top5"] = sorted(procs, key=lambda x: x["ram"], reverse=True)[:5]
             except Exception:  # noqa: BLE001
                 out["top5"] = []
             return out
 
         def done(ok, res):
-            if not ok:
-                self._health_lbl.setText(f"Error: {res}")
-                return
-            self._health_lbl.setText(f"Batería: {res.get('batt', 'N/A')}  ·  Disco C: {res.get('disk_free', 'N/A')}")
+            self._health_busy = False
+            self._health_at = time.monotonic()
+            if not ok or not isinstance(res, dict):
+                self._hw = {"batt": f"Error: {res}", "disk": f"Error: {res}"}
+                res = {}
+            else:
+                self._hw = {"batt": res.get("batt"), "disk": res.get("disk")}
+            self._batt_card.refresh()
+            self._disk_card.refresh()
             top5 = res.get("top5", [])
-            self._top_table.setProperty("_health_rows", top5)
             with frozen(self._top_table):
                 self._top_table.setRowCount(len(top5))
                 for r, p in enumerate(top5):
@@ -449,39 +519,69 @@ class GhostPage(Page):
 
     # --- Inspector de Inicio de Windows (Autoruns) ------------------------------------------------
     def _build_autoruns_card(self) -> QFrame:
-        box, lay = make_card("Inspector de Inicio de Windows (Autoruns)",
-                             "Entradas que arrancan automáticamente con el equipo (HKCU Run + carpetas Inicio). "
-                             "Solo lectura; ayuda a detectar programas que ralentizan el arranque.")
+        box, lay = make_card("Inspector de Inicio (Autoruns)",
+                             "Programas que arrancan solos con Windows: claves Run/RunOnce del registro "
+                             "(HKCU, incluida HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Run, "
+                             "y HKLM) y carpetas Inicio. Solo lectura. ● verde: el ejecutable existe en disco · "
+                             "● ámbar: ruta rota o ejecutable fantasma.")
         row = QHBoxLayout()
         row.setSpacing(10)
-        scan_btn = QPushButton("Escanear entradas de inicio")
-        scan_btn.setObjectName("Ghost")
-        with_icon(scan_btn, "fa5s.search", COLORS["muted"])
-        self._autoruns_table = make_table(["Nombre", "Origen", "Ruta del ejecutable", "Existe"],
-                                          widths=[180, 200, 300],
-                                          empty="Pulsa «Escanear» para listar las entradas de inicio.")
-        self._autoruns_table.setMaximumHeight(200)
-        scan_btn.clicked.connect(self._scan_autoruns)
-        row.addWidget(scan_btn)
-        row.addStretch(1)
+        self._autoruns_btn = QPushButton("Volver a escanear")
+        self._autoruns_btn.setObjectName("Ghost")
+        with_icon(self._autoruns_btn, "fa5s.search", COLORS["muted"])
+        self._autoruns_btn.clicked.connect(self._scan_autoruns)
+        self._autoruns_summary = QLabel("Se escanea al entrar en la página.")
+        self._autoruns_summary.setObjectName("Tiny")
+        row.addWidget(self._autoruns_btn)
+        row.addWidget(self._autoruns_summary, 1)
+        self._autoruns_table = make_table(["", "Nombre", "Origen", "Ruta del ejecutable", "Estado"],
+                                          widths=[34, 180, 170, 330],
+                                          empty="Escaneando las entradas de inicio…", empty_icon="fa5s.rocket")
+        self._autoruns_table.setMaximumHeight(240)
         lay.addLayout(row)
         lay.addWidget(self._autoruns_table)
         return box
 
     def _scan_autoruns(self) -> None:
+        if self._autoruns_busy:
+            return
+        self._autoruns_busy = True
+        set_busy(self._autoruns_btn, True, "Escaneando…")
+
         def done(ok, entries):
-            if not ok:
+            self._autoruns_busy = False
+            self._autoruns_done = True
+            set_busy(self._autoruns_btn, False)
+            if not ok or not isinstance(entries, list):
+                self._autoruns_summary.setText(f"No se pudo leer el inicio: {entries}")
                 self.app.console.log("x", f"Autoruns: {entries}")
                 return
-            with frozen(self._autoruns_table):
-                self._autoruns_table.setRowCount(len(entries))
+            # Primero lo sospechoso (ruta rota / fantasma), luego por nombre.
+            entries = sorted(entries, key=lambda e: (bool(e.get("existe")), str(e.get("nombre", "")).lower()))
+            broken = sum(1 for e in entries if not e.get("existe"))
+            table = self._autoruns_table
+            if not entries:
+                table.set_empty_text("No hay programas que arranquen solos con el equipo.", "fa5s.check-circle")
+            with frozen(table):
+                table.setRowCount(len(entries))
                 for r, e in enumerate(entries):
-                    existe = "Sí" if e.get("existe") else "No"
-                    color = "#22C55E" if e.get("existe") else "#F59E0B"
-                    for c, v in enumerate([e.get("nombre", ""), e.get("origen", ""), e.get("ruta", ""), existe]):
-                        item = QTableWidgetItem(v)
-                        if c == 3:
-                            item.setForeground(QColor(color))
-                        self._autoruns_table.setItem(r, c, item)
-            self.app.console.log("~", f"Autoruns: {len(entries)} entradas de inicio encontradas")
+                    exists = bool(e.get("existe"))
+                    ruta = str(e.get("ruta") or "")
+                    estado = "En disco" if exists else ("Ruta rota" if ruta else "Ruta no determinable")
+                    tip = f"{e.get('comando', '')}\n{e.get('ubicacion', '')}"
+                    dot = QTableWidgetItem("●")
+                    dot.setForeground(QColor(COLORS["ok"] if exists else COLORS["warn"]))
+                    dot.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+                    cells = [dot] + [QTableWidgetItem(v) for v in (str(e.get("nombre", "")), str(e.get("origen", "")),
+                                                                    ruta or "—", estado)]
+                    if not exists:
+                        cells[-1].setForeground(QColor(COLORS["warn"]))
+                    for c, item in enumerate(cells):
+                        item.setToolTip(tip)
+                        table.setItem(r, c, item)
+            resumen = f"{len(entries)} entradas" + (f" · {broken} con ruta rota o fantasma" if broken else
+                                                    " · todas apuntan a archivos existentes")
+            self._autoruns_summary.setText(resumen)
+            self.app.console.log("!" if broken else "~", f"Autoruns: {resumen}")
+
         self.app.run_task(lambda emit: startup_entries(), done, track=False)

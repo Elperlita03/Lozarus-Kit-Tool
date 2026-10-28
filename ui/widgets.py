@@ -440,7 +440,11 @@ class Gauge(QWidget):
 
 
 class BentoCard(QFrame):
-    """Tarjeta grande clicable (bento) con icono, título, descripción y estado; borde animado al hover."""
+    """
+    Tarjeta grande clicable (bento) con icono, título, descripción y estado; borde animado al hover.
+    `status_fn()` devuelve (activo, texto) o (activo, texto, valor): `valor` es una métrica que se
+    muestra grande bajo el título, y `activo` puede ser un color para el punto (p. ej. COLORS["warn"]).
+    """
 
     def __init__(self, icon_name, title, desc, status_fn, on_click):
         super().__init__()
@@ -471,13 +475,17 @@ class BentoCard(QFrame):
         d = QLabel(desc)
         d.setObjectName("CardText")
         d.setWordWrap(True)
+        self.value = QLabel("")
+        self.value.setObjectName("ChipVal")
+        self.value.setVisible(False)  # solo las tarjetas con métrica lo muestran
         lay.addWidget(t)
+        lay.addWidget(self.value)
         lay.addWidget(d)
         lay.addStretch(1)
         self.status = QLabel("")
         self.status.setObjectName("Tiny")
         lay.addWidget(self.status)
-        self._last: Optional[Tuple[bool, str]] = None
+        self._last: Optional[tuple] = None
         self._apply()
         self.refresh()  # aura: la pinta AuraHost alrededor de #Bento (sprite en caché, sin re-desenfocar)
 
@@ -486,9 +494,13 @@ class BentoCard(QFrame):
         if state == self._last:
             return  # sin cambios: no re-aplicar estilos (cada setStyleSheet fuerza un re-polish)
         self._last = state
-        active, text = state
-        self.dot.setStyleSheet(f"color:{COLORS['ok'] if active else COLORS['faint']}; font-size:11px;")
+        active, text = state[0], state[1]
+        color = active if isinstance(active, str) else COLORS["ok"] if active else COLORS["faint"]
+        self.dot.setStyleSheet(f"color:{color}; font-size:11px;")
         self.status.setText(text)
+        if len(state) > 2:
+            self.value.setText(state[2])
+            self.value.setVisible(True)
 
     def _get_border(self):
         return self._border
