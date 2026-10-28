@@ -73,6 +73,7 @@ from ui.page_honeypot import HoneypotPage  # noqa: E402
 from ui.page_arsenal import ArsenalPage  # noqa: E402
 from ui.page_guard import GuardPage  # noqa: E402
 from ui.page_history import HistorialPage  # noqa: E402
+from ui.page_optimizacion_red import OptimizacionRedPage  # noqa: E402
 
 __all__ = ["MainWindow", "NavButton", "HoldButton", "ProcessMonitor", "main"]  # ProcessMonitor: pruebas
 
@@ -231,11 +232,12 @@ class MainWindow(QMainWindow):
     NAV = [("comando", "Centro de Comando"), ("monitor", "Monitor en Vivo"),
            ("auditoria", "Escaneo de Vectores"), ("historial", "Historial"),
            ("red", "Endurecimiento de Red"), ("honeypot", "Honeypot"),
-           ("arsenal", "Arsenal & Modo Fantasma"), ("guardia", "Guardia & Rollback")]
+           ("arsenal", "Arsenal & Modo Fantasma"), ("guardia", "Guardia & Rollback"),
+           ("optimizacion", "Optimización de Red y Procesos")]
 
     NAV_SECTORS = [
         ("CENTRO DE CONTROL", ["comando", "monitor"]),
-        ("SISTEMA Y PERÍMETRO", ["auditoria", "red", "arsenal", "guardia"]),
+        ("SISTEMA Y PERÍMETRO", ["auditoria", "red", "optimizacion", "arsenal", "guardia"]),
         ("LABORATORIO Y REGISTRO", ["honeypot", "historial"]),
     ]
 
@@ -317,7 +319,8 @@ class MainWindow(QMainWindow):
         self.pages = {"comando": CommandPage(self), "monitor": MonitorPage(self),
                       "auditoria": AuditPage(self), "historial": HistorialPage(self),
                       "red": NetworkPage(self), "honeypot": HoneypotPage(self),
-                      "arsenal": ArsenalPage(self), "guardia": GuardPage(self)}
+                      "arsenal": ArsenalPage(self), "guardia": GuardPage(self),
+                      "optimizacion": OptimizacionRedPage(self)}
         for page in self.pages.values():
             self.stack.addWidget(page)
         body.addWidget(self.stack, 1)
@@ -390,7 +393,7 @@ class MainWindow(QMainWindow):
     def _build_sidebar(self) -> QWidget:
         side = QFrame()
         side.setObjectName("Sidebar")
-        side.setFixedWidth(272)   # holgado: «Endurecimiento de Red» no se recorta en ninguna fuente
+        side.setFixedWidth(292)   # holgado: «Optimización de Red y Procesos» no se recorta en ninguna fuente
         lay = QVBoxLayout(side)
         lay.setContentsMargins(14, 16, 14, 16)
         lay.setSpacing(3)
