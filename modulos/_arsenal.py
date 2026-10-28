@@ -12,6 +12,7 @@ from __future__ import annotations
 import json
 import os
 import subprocess
+import sys
 import time
 from dataclasses import dataclass
 from typing import Dict, List, Optional, Tuple
@@ -22,6 +23,7 @@ from ._privacidad import clean_temp, temp_dir
 from ._utilidades import HAS_PSUTIL, is_admin, powershell_raw, psutil, run_cmd
 
 STATE_FILE = os.path.join(FORENSICS_DIR, "rollback_state.json")
+REQUIREMENTS_PATH = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "requirements.txt")
 
 # (colmena, subclave, nombre del valor, dato deseado): int -> REG_DWORD, str -> REG_SZ ("" = predeterminado)
 RegValue = Tuple[str, str, str, object]
@@ -307,6 +309,24 @@ def debloat() -> dict:
     return {"removed": removed, "requested": list(BLOATWARE)}
 
 
+def install_requirements(path: str = REQUIREMENTS_PATH) -> dict:
+    """`python -m pip install -r requirements.txt` sin shell (Kit Técnico). Devuelve {ok, summary}. No lanza."""
+    if getattr(sys, "frozen", False):
+        return {"ok": False, "summary": "Ejecutable empaquetado: las dependencias ya van incluidas."}
+    if not os.path.isfile(path):
+        return {"ok": False, "summary": f"No se encontró {os.path.basename(path)}."}
+    try:
+        code, out, err = run_cmd([sys.executable, "-m", "pip", "install", "--disable-pip-version-check", "-r", path],
+                                 timeout=600)
+    except Exception as exc:  # noqa: BLE001  (pip ausente, sin red, tiempo agotado…)
+        return {"ok": False, "summary": f"{type(exc).__name__}: {exc}"}
+    lines = [ln.strip() for ln in (out + "\n" + err).splitlines() if ln.strip()]
+    installed = next((ln for ln in lines if ln.startswith("Successfully installed")), "")
+    if code == 0:
+        return {"ok": True, "summary": installed or "Todas las dependencias ya estaban instaladas."}
+    return {"ok": False, "summary": (lines[-1] if lines else f"pip terminó con código {code}")[:300]}
+
+
 def _explorer_running() -> bool:
     if not HAS_PSUTIL:
         return False
@@ -335,4 +355,4 @@ def restart_explorer() -> dict:
 
 __all__ = ["IS_WINDOWS", "TWEAKS", "BY_KEY", "BLOATWARE", "STATE_FILE", "Tweak", "apply", "revert",
            "snapshot", "load_state", "describe", "purge_temp", "debloat", "finish_rollback", "restart_explorer",
-           "rollback_entries", "restore_value"]
+           "rollback_entries", "restore_value", "install_requirements", "REQUIREMENTS_PATH"]

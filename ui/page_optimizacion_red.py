@@ -21,15 +21,16 @@ from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QColor
 from PySide6.QtWidgets import (QGridLayout, QHBoxLayout, QLabel, QLineEdit, QPushButton, QSizePolicy,
-                               QTableWidgetItem, QVBoxLayout)
+                               QTableWidgetItem)
 
-from modulos._optimizacion_red import (CPU_ANOMALY_PCT, IS_WINDOWS, MAINTENANCE_OPS, adapters_overview,
+from modulos._optimizacion_red import (CPU_ANOMALY_PCT, IS_WINDOWS, MAINTENANCE_OPS, STACK_OPS, adapters_overview,
                                        run_maintenance, scan_processes, terminate_process)
 
-from ui.theme import COLORS, badge_qss
-from ui.widgets import (Page, _emit_event, flash_aura, format_bytes, frozen, make_card, make_table, set_busy,
-                        stat_chip, tech_tip, with_icon)
+from ui.theme import COLORS
+from ui.widgets import (Page, _emit_event, fit_columns, flash_aura, format_bytes, frozen, make_card, make_table,
+                        set_busy, stat_chip, tech_tip, with_icon)
 from ui.dialogs import ConfirmDialog
+from ui.kit import HeaderStatus
 from ui.chrome import Toast
 
 if TYPE_CHECKING:  # solo para las anotaciones; en ejecución evita el import circular
@@ -147,29 +148,18 @@ class OptimizacionRedPage(Page):
     # Cabecera: indicador de estado + privilegios
     # =============================================================================================
     def _build_status_header(self) -> None:
-        header = self.layout().itemAt(0).layout()  # cabecera fija de Page (icono + título)
-        pills = QVBoxLayout()
-        pills.setSpacing(6)
-        self.status_pill = QLabel()
-        self.priv_pill = QLabel()
-        for pill in (self.status_pill, self.priv_pill):
-            pill.setAlignment(Qt.AlignmentFlag.AlignCenter)
-            pills.addWidget(pill, 0, Qt.AlignmentFlag.AlignRight)
-        pills.addStretch(1)
-        header.addLayout(pills)
+        self.header_status = HeaderStatus()
+        self.add_header_widget(self.header_status)
 
     def _update_status(self) -> None:
         if self._running:
-            text, color = f"●  EN CURSO · {self._running}", COLORS["accent"]
+            text, color = f"EN CURSO · {self._running}", COLORS["accent"]
         else:
             pending = (sum(1 for p in self._procs if p["anomalies"] or p["sig_state"] == "invalid")
                        + sum(1 for a in self._adapters if a["health"] == "degradado"))
-            text, color = (f"●  REVISAR · {pending}", COLORS["warn"]) if pending else ("●  LISTO", COLORS["ok"])
-        self.status_pill.setText(text)
-        self.status_pill.setStyleSheet(badge_qss(color, 10))
-        admin = bool(getattr(self.app, "admin", False))
-        self.priv_pill.setText("ADMINISTRADOR" if admin else "USUARIO ESTÁNDAR")
-        self.priv_pill.setStyleSheet(badge_qss(COLORS["ok"] if admin else COLORS["muted"], 10))
+            text, color = (f"REVISAR · {pending}", COLORS["warn"]) if pending else ("LISTO", COLORS["ok"])
+        self.header_status.set_state(text, color)
+        self.header_status.set_admin(bool(getattr(self.app, "admin", False)))
 
     # =============================================================================================
     # Fila Bento de métricas
@@ -208,9 +198,10 @@ class OptimizacionRedPage(Page):
         lay.addLayout(row)
         self.adapters_table = make_table(
             ["Adaptador", "Estado", "Velocidad", "IPv4", "MTU", "Errores"],
-            widths=[150, 104, 92, 130, 64],
+            widths=[146, 100, 88, 126, 62],
             empty="Pulsa «Auditar adaptadores» para leer el estado de las interfaces de red.",
             empty_icon="fa5s.ethernet")
+        fit_columns(self.adapters_table, 0, (1, 2, 3, 4, 5))
         self.adapters_table.setMinimumHeight(250)
         lay.addWidget(self.adapters_table, 1)
         return box
@@ -267,7 +258,8 @@ class OptimizacionRedPage(Page):
                              "confirmación; las marcadas en rojo se aplican al reiniciar el equipo.")
         grid = QGridLayout()
         grid.setSpacing(10)
-        for i, (key, (desc, commands, reboot)) in enumerate(MAINTENANCE_OPS.items()):
+        for i, key in enumerate(STACK_OPS):
+            desc, commands, reboot = MAINTENANCE_OPS[key]
             icon_name, text, detail = OPS_UI[key]
             btn = self._btn(text, icon_name, "Danger" if reboot else "Ghost",
                             lambda _=False, k=key: self._maintenance(k))
@@ -276,7 +268,7 @@ class OptimizacionRedPage(Page):
             if not IS_WINDOWS:
                 btn.setEnabled(False)
             self._op_buttons[key] = btn
-            grid.addWidget(btn, i // 2, i % 2)
+            grid.addWidget(btn, i, 0)  # una columna: deja el ancho a la tabla de adaptadores
         lay.addLayout(grid)
         self.maint_status = QLabel("Sin operaciones en esta sesión.")
         self.maint_status.setObjectName("Tiny")
@@ -357,9 +349,11 @@ class OptimizacionRedPage(Page):
         self.proc_filter.textChanged.connect(lambda _t: self._render_processes())
         lay.addWidget(self.proc_filter)
         self.proc_table = make_table(["PID", "Nombre", "Ruta", "CPU", "RAM", "Estado", "Firma digital"],
-                                     widths=[70, 180, 330, 70, 86, 96],
+                                     widths=[66, 170, 316, 66, 84, 94],
                                      empty="Pulsa «Escanear procesos» para listar los procesos en ejecución.",
                                      empty_icon="fa5s.microchip")
+        fit_columns(self.proc_table, 2)  # la ruta absorbe el ancho libre; el resto, ancho fijo
+        self.proc_table.setColumnWidth(6, 150)
         self.proc_table.setMinimumHeight(340)
         self.proc_table.itemSelectionChanged.connect(self._on_proc_select)
         lay.addWidget(self.proc_table)

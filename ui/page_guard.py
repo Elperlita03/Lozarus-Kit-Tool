@@ -20,6 +20,7 @@ from PySide6.QtWidgets import QAbstractItemView, QHBoxLayout, QLabel, QPushButto
 
 from modulos import _arsenal as arsenal
 from modulos import _guardia as guardia
+from modulos._inicio import startup_entries
 
 from ui.theme import COLORS
 from ui.widgets import Page, _emit_event, flash_aura, frozen, make_card, make_table, set_busy, tech_tip, with_icon
@@ -53,8 +54,11 @@ class GuardPage(Page):
         self._guard_busy = False
         self._acting = False
         self._rb_rows: List[dict] = []
+        self._autoruns_busy = False
+        self._autoruns_done = False
         self.root.addWidget(self._build_guard_card())
         self.root.addWidget(self._build_rollback_card())
+        self.root.addWidget(self._build_autoruns_card())
         self.root.addStretch(1)
         self._timer = QTimer(self)
         self._timer.setInterval(GUARD_INTERVAL_MS)
@@ -327,6 +331,75 @@ class GuardPage(Page):
     def showEvent(self, event) -> None:
         super().showEvent(event)
         self.refresh_rollback()
+        if not self._autoruns_done:
+            self._scan_autoruns()
+
+    # =============================================================================================
+    # Inventario de inicio (Autoruns): lo que arranca solo con Windows, en solo lectura
+    # =============================================================================================
+    def _build_autoruns_card(self):
+        box, lay = make_card("Inventario de inicio (Autoruns)",
+                             "Programas que arrancan solos con Windows: claves Run/RunOnce (HKCU y HKLM, incluida la "
+                             "vista de 32 bits) y carpetas Inicio. Solo lectura. ● verde: el ejecutable existe en disco · "
+                             "● ámbar: ruta rota o ejecutable fantasma.")
+        row = QHBoxLayout()
+        row.setSpacing(10)
+        self._autoruns_btn = self._btn("Volver a escanear", "fa5s.search", "Ghost", self._scan_autoruns)
+        self._autoruns_summary = QLabel("Se escanea al entrar en la página.")
+        self._autoruns_summary.setObjectName("Tiny")
+        row.addWidget(self._autoruns_btn)
+        row.addWidget(self._autoruns_summary, 1)
+        self._autoruns_table = make_table(["", "Nombre", "Origen", "Ruta del ejecutable", "Estado"],
+                                          widths=[34, 180, 170, 330],
+                                          empty="Escaneando las entradas de inicio…", empty_icon="fa5s.rocket")
+        self._autoruns_table.setMinimumHeight(200)
+        lay.addLayout(row)
+        lay.addWidget(self._autoruns_table)
+        return box
+
+    def _scan_autoruns(self) -> None:
+        if self._autoruns_busy:
+            return
+        self._autoruns_busy = True
+        set_busy(self._autoruns_btn, True, "Escaneando…")
+
+        def done(ok, entries):
+            self._autoruns_busy = False
+            self._autoruns_done = True
+            set_busy(self._autoruns_btn, False)
+            if not ok or not isinstance(entries, list):
+                self._autoruns_summary.setText(f"No se pudo leer el inicio: {entries}")
+                self.app.console.log("x", f"Autoruns: {entries}")
+                return
+            # Primero lo sospechoso (ruta rota / fantasma), luego por nombre.
+            entries = sorted(entries, key=lambda e: (bool(e.get("existe")), str(e.get("nombre", "")).lower()))
+            broken = sum(1 for e in entries if not e.get("existe"))
+            table = self._autoruns_table
+            if not entries:
+                table.set_empty_text("No hay programas que arranquen solos con el equipo.", "fa5s.check-circle")
+            with frozen(table):
+                table.setRowCount(len(entries))
+                for r, e in enumerate(entries):
+                    exists = bool(e.get("existe"))
+                    ruta = str(e.get("ruta") or "")
+                    estado = "En disco" if exists else ("Ruta rota" if ruta else "Ruta no determinable")
+                    tip = f"{e.get('comando', '')}\n{e.get('ubicacion', '')}"
+                    dot = QTableWidgetItem("●")
+                    dot.setForeground(QColor(COLORS["ok"] if exists else COLORS["warn"]))
+                    dot.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+                    cells = [dot] + [QTableWidgetItem(v) for v in (str(e.get("nombre", "")), str(e.get("origen", "")),
+                                                                    ruta or "—", estado)]
+                    if not exists:
+                        cells[-1].setForeground(QColor(COLORS["warn"]))
+                    for c, item in enumerate(cells):
+                        item.setToolTip(tip)
+                        table.setItem(r, c, item)
+            summary = f"{len(entries)} entradas" + (f" · {broken} con ruta rota o fantasma" if broken else
+                                                    " · todas apuntan a archivos existentes")
+            self._autoruns_summary.setText(summary)
+            self.app.console.log("!" if broken else "~", f"Autoruns: {summary}")
+
+        self.app.run_task(lambda emit: startup_entries(), done, track=False)
 
     def refresh_rollback(self) -> None:
         if not arsenal.IS_WINDOWS:

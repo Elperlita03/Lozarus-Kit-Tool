@@ -226,6 +226,13 @@ def set_service_startup(name, mode):
         return False, False, f"No se pudo cambiar el servicio: {exc}"
 
 
+def service_commands(name, action):
+    """Comandos `sc` EXACTOS que ejecutará disable_service / restore_service (para confirmarlos). Pura."""
+    if action == "disable":
+        return [["sc", "stop", name], ["sc", "config", name, "start=", "disabled"]]
+    return [["sc", "config", name, "start=", _SC_MODE[_DEFAULT_START.get(name, "demand")]]]
+
+
 def disable_service(name):
     """Desactiva (start=disabled) y detiene un servicio. Requiere admin. (ok, requiere_admin, msg)."""
     return set_service_startup(name, "disabled")

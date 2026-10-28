@@ -85,7 +85,7 @@ class NavButton(QPushButton):
     """Botón del menú lateral con hover/activo suave mediante QPropertyAnimation (color de fondo)."""
 
     def __init__(self, text: str, icon_name: str = None):
-        super().__init__(text)
+        super().__init__(text.replace("&", "&&"))  # «&» literal: Qt lo tomaría como atajo de teclado
         self.setObjectName("NavButton")
         self.setCursor(Qt.CursorShape.PointingHandCursor)
         self.setFixedHeight(44)
@@ -534,8 +534,9 @@ class MainWindow(QMainWindow):
         worker.done.connect(finish)
         self._launch(worker, track)
 
-    def run_ghost(self, options, term, on_finish: Callable[[], None]) -> None:
-        """Ejecuta ghost_mode en segundo plano volcando cada línea a la consola Y a la terminal en vivo."""
+    def run_ghost(self, options, term, on_finish: Callable[[bool, Any], None]) -> None:
+        """Ejecuta ghost_mode en segundo plano volcando cada línea a la consola Y a la terminal en vivo.
+        Al terminar entrega (ok, resultado) a `on_finish` (registro en la Caja Negra y aviso)."""
         if self._closing:
             return
         worker = Worker(lambda emit: ghost_mode(options, is_admin=self.admin, emit=emit))
@@ -554,7 +555,7 @@ class MainWindow(QMainWindow):
                 term.finish()
             if not ok:
                 self.console.log("x", f"Modo Fantasma: {payload}")
-            on_finish()
+            on_finish(ok, payload)
 
         worker.done.connect(finish)
         self._launch(worker, track=True)

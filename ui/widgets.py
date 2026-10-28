@@ -23,8 +23,8 @@ from PySide6.QtCore import (Property, QAbstractAnimation, QEasingCurve, QEvent, 
 from PySide6.QtGui import (QBrush, QColor, QFont, QIcon, QImage, QPainter, QPainterPath, QPen, QPixmap,
                            QPolygonF, QRadialGradient)
 from PySide6.QtWidgets import (QAbstractItemView, QFrame, QGraphicsDropShadowEffect, QGraphicsScene,
-                               QHBoxLayout, QLabel, QPushButton, QScrollArea, QTableWidget, QVBoxLayout,
-                               QWidget)
+                               QHBoxLayout, QHeaderView, QLabel, QPushButton, QScrollArea, QTableWidget,
+                               QVBoxLayout, QWidget)
 
 from ui._compat import HAS_QTA, Event, ObservationQuality, qta
 from ui.theme import COLORS, GLASS
@@ -486,6 +486,19 @@ def make_table(headers: Sequence[str], widths: Optional[Sequence[int]] = None,
     return t
 
 
+def fit_columns(table: QTableWidget, stretch: int, to_contents: Sequence[int] = ()) -> None:
+    """
+    La columna `stretch` absorbe el ancho libre y las de `to_contents` se ajustan a su contenido: la tabla
+    no desborda en horizontal en la ventana mínima (el texto largo se recorta con «…»). Para tablas con
+    muchas filas, deja `to_contents` vacío (ajustar al contenido recorre todas las filas).
+    """
+    header = table.horizontalHeader()
+    header.setStretchLastSection(False)
+    header.setSectionResizeMode(stretch, QHeaderView.ResizeMode.Stretch)
+    for col in to_contents:
+        header.setSectionResizeMode(col, QHeaderView.ResizeMode.ResizeToContents)
+
+
 def make_card(title: str, desc: str = "") -> Tuple[QFrame, QVBoxLayout]:
     """Tarjeta estándar (márgenes y espaciado únicos) con título y descripción opcional."""
     box = QFrame()
@@ -562,6 +575,7 @@ class Page(QWidget):
         titlecol.addWidget(head)
         titlecol.addWidget(sub)
         header.addLayout(titlecol, 1)
+        self._header = header
         outer.addLayout(header)
 
         scroll = QScrollArea()
@@ -578,6 +592,10 @@ class Page(QWidget):
         # Las páginas montan sus botones DESPUÉS de este __init__: su aura se aplica al volver al
         # bucle de eventos, cuando ya existen todos.
         QTimer.singleShot(0, self, lambda: apply_button_auras(self))
+
+    def add_header_widget(self, widget: QWidget) -> None:
+        """Añade un widget a la derecha de la cabecera fija (p. ej. el indicador de estado global)."""
+        self._header.addWidget(widget, 0, Qt.AlignmentFlag.AlignTop)
 
 
 class Gauge(QWidget):

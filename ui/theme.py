@@ -124,6 +124,16 @@ QSS = Template("""
 /* Baldosas hundidas dentro de una tarjeta (componentes, paneles del Piloto Automático) */
 #Inset, #CompCard, #CompRow { background-color: ${inset}; border: 1px solid ${border}; border-radius: 10px; }
 #Inset:hover, #CompCard:hover, #CompRow:hover { border-color: ${border_hi}; }
+/* Baldosa Bento dentro de una tarjeta (ui/kit.Tile): hundida, con su propio «rim light» cenital */
+#Tile { background-color: ${inset}; border: 1px solid ${border}; border-top: 1px solid rgba(255, 255, 255, 0.26);
+    border-radius: 12px; }
+#Tile:hover { border-color: ${border_hi}; border-top-color: ${rim_hi}; }
+#TileTitle { color: ${text}; font-size: 10pt; font-weight: 700; letter-spacing: 0.3px; }
+/* Campos del inspector de doble columna y de las baldosas */
+#FieldCap { color: ${muted}; font-size: 8pt; font-weight: 700; letter-spacing: 1.2px; }
+#FieldVal { color: ${text2}; font-size: 10pt; }
+#FieldMono { color: ${text}; font-family: ${mono}; font-size: 9pt; }
+#VSep { background-color: ${border}; border: none; }
 /* Interruptor (QCheckBox#Switch): pista y mando son SVG estáticos, sin animación ni repintado extra */
 QCheckBox#Switch { color: ${text}; font-size: 10pt; font-weight: 600; spacing: 10px; }
 QCheckBox#Switch:disabled { color: ${disabled}; }
@@ -227,10 +237,12 @@ QScrollBar::add-line, QScrollBar::sub-line { width: 0; height: 0; border: none; 
 QScrollBar::up-arrow, QScrollBar::down-arrow, QScrollBar::left-arrow, QScrollBar::right-arrow { background: none; }
 QScrollBar::add-page, QScrollBar::sub-page { background: none; }
 /* Tablas: transparentes sobre el cristal, filas de alto fijo (make_table), sin rejilla ni foco. */
+/* El color por defecto va en el widget, NO en ::item: un color en ::item anula el de cada celda
+   (setForeground) y los estados semánticos (CRITICAL en rojo, ● Activo en verde) salían en blanco. */
 QTableWidget { background-color: transparent; alternate-background-color: rgba(255, 255, 255, 0.022);
-    border: none; gridline-color: transparent; color: ${text2}; font-size: 10pt; outline: 0;
+    border: none; gridline-color: transparent; color: ${text}; font-size: 10pt; outline: 0;
     selection-background-color: ${tint_hi}; }
-QTableWidget::item { padding: 0 8px; color: ${text}; border: none; }
+QTableWidget::item { padding: 0 8px; border: none; }
 QTableWidget::item:selected { background-color: ${tint_hi}; color: #FFFFFF; }
 QHeaderView { background-color: transparent; border: none; }
 QHeaderView::section { background-color: rgba(255, 255, 255, 0.04); color: ${text2}; border: none;

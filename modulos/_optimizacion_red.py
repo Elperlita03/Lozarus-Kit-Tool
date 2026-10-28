@@ -55,7 +55,11 @@ MAINTENANCE_OPS: Dict[str, Tuple[str, List[List[str]], bool]] = {
                                           ["netsh", "int", "ipv6", "reset"]], True),
     "dhcp": ("Renovar concesión DHCP", [["ipconfig", "/release"], ["ipconfig", "/renew"]], False),
     "dns": ("Purgar y re-registrar DNS", [["ipconfig", "/flushdns"], ["ipconfig", "/registerdns"]], False),
+    "flushdns": ("Purgar caché DNS", [["ipconfig", "/flushdns"]], False),
+    "arp": ("Purgar tabla ARP", [["netsh", "interface", "ip", "delete", "arpcache"]], False),
 }
+STACK_OPS = ("winsock", "tcpip", "dhcp", "dns")   # mantenimiento de la pila (Optimización de Red)
+RESCUE_OPS = ("flushdns", "arp", "winsock")       # rescate de red (Endurecimiento de Red y Perímetro)
 
 
 # ---------------------------------------------------------------------------------------------
